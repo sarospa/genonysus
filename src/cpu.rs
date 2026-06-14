@@ -11,16 +11,18 @@ mod tests;
 
 #[derive(Debug)]
 pub struct CPU {
-	pub cart_memory: Vec<u8>,
-	pub ram: Vec<u8>,
-	pub program_counter: u32,
-	pub status_register: u16,
-	pub d: [u32; 8],
-	pub a: [u32; 8],
-	pub controller1: Controller,
-	pub controller1_control: u8,
-	pub controller2: Controller,
-	pub controller2_control: u8,
+	cart_memory: Vec<u8>,
+	ram: Vec<u8>,
+	program_counter: u32,
+	status_register: u16,
+	d: [u32; 8],
+	a: [u32; 7],
+	usp: u32,
+	ssp: u32,
+	controller1: Controller,
+	controller1_control: u8,
+	controller2: Controller,
+	controller2_control: u8,
 }
 
 impl CPU {
@@ -36,7 +38,9 @@ impl CPU {
 			program_counter: CPU::load_u32_at(&rom, 4),
 			status_register: 0,
 			d: [0; 8],
-			a: [0, 0, 0, 0, 0, 0, 0, CPU::load_u32_at(&rom, 0)],
+			a: [0, 0, 0, 0, 0, 0, 0],
+			usp: 0,
+			ssp: CPU::load_u32_at(&rom, 0),
 			controller1: Controller::Unplugged,
 			controller1_control: 0,
 			controller2: Controller::Unplugged,
@@ -48,7 +52,7 @@ impl CPU {
 		let address_index = (address as usize) & ADDRESS_SPACE;
 		match address_index {
 			0..CART_SIZE => self.cart_memory[address_index],
-			RAM_START..RAM_END => self.cart_memory[address_index - RAM_START],
+			RAM_START..RAM_END => self.ram[address_index - RAM_START],
 			0xA10002..=0xA10003 => self.controller1.read(),
 			0xA10004..=0xA10005 => self.controller2.read(),
 			0xA10008..=0xA10009 => self.controller1_control,
@@ -79,7 +83,7 @@ impl CPU {
 			+ (self.read_u8(address + 3) as u32)
 	}
 	
-	fn read(&self, address: u32, size: &Size) -> Data {
+	fn read(&self, address: u32, size: Size) -> Data {
 		match size {
 			Size::Byte => Data::Byte(self.read_u8(address)),
 			Size::Word => Data::Word(self.read_u16(address)),
@@ -87,9 +91,19 @@ impl CPU {
 		}
 	}
 	
-	fn read_register(&self, size: &Size, reg: &Register) -> Data {
+	fn read_register(&self, reg: Register, size: Size) -> Data {
 		let data = match reg {
-			Register::A(a) => self.a[a.get()],
+			Register::A(a) => {
+				if a.get() < 7 {
+					self.a[a.get()]
+				}
+				else if self.status_register & 0x2000 == 0x2000 {
+					self.ssp
+				}
+				else {
+					self.usp
+				}
+			},
 			Register::D(d) => self.d[d.get()],
 		};
 		match size {
@@ -99,32 +113,32 @@ impl CPU {
 		}
 	}
 	
-	fn read_register_u8(&self, reg: &Register) -> u8 {
-		match reg {
-			Register::A(a) => self.a[a.get()] as u8,
-			Register::D(d) => self.d[d.get()] as u8,
+	fn read_register_u8(&self, reg: Register) -> u8 {
+		match self.read_register(reg, Size::Byte) {
+			Data::Byte(d) => d,
+			_ => panic!("Incorrect data size in read_register_u8"),
 		}
 	}
 	
-	fn read_register_u16(&self, reg: &Register) -> u16 {
-		match reg {
-			Register::A(a) => self.a[a.get()] as u16,
-			Register::D(d) => self.d[d.get()] as u16,
+	fn read_register_u16(&self, reg: Register) -> u16 {
+		match self.read_register(reg, Size::Word) {
+			Data::Word(d) => d,
+			_ => panic!("Incorrect data size in read_register_u16"),
 		}
 	}
 	
-	fn read_register_u32(&self, reg: &Register) -> u32 {
-		match reg {
-			Register::A(a) => self.a[a.get()],
-			Register::D(d) => self.d[d.get()],
+	fn read_register_u32(&self, reg: Register) -> u32 {
+		match self.read_register(reg, Size::Long) {
+			Data::Long(d) => d,
+			_ => panic!("Incorrect data size in read_register_u32"),
 		}
 	}
 	
 	fn write_u8(&mut self, address: u32, data: u8) {
 		let address_index = (address as usize) & ADDRESS_SPACE;
 		match address_index {
-			0..CART_SIZE => self.cart_memory[address_index] = data,
-			RAM_START..RAM_END => self.cart_memory[address_index - RAM_START] = data,
+			0..CART_SIZE => (), // Don't overwrite the cart ROM!
+			RAM_START..RAM_END => self.ram[address_index - RAM_START] = data,
 			0xA10002..=0xA10003 => self.controller1.write(),
 			0xA10004..=0xA10005 => self.controller2.write(),
 			0xA10008..=0xA10009 => self.controller1_control = data,
@@ -154,26 +168,36 @@ impl CPU {
 		self.write_u8(address, (data & 0x000000FF) as u8);
 	}
 	
-	fn write(&mut self, address: u32, data: &Data) {
+	fn write(&mut self, address: u32, data: Data) {
 		match data {
-			Data::Byte(d) => self.write_u8(address, *d),
-			Data::Word(d) => self.write_u16(address, *d),
-			Data::Long(d) => self.write_u32(address, *d),
+			Data::Byte(d) => self.write_u8(address, d),
+			Data::Word(d) => self.write_u16(address, d),
+			Data::Long(d) => self.write_u32(address, d),
 		}
 	}
 	
-	fn write_register(&mut self, data: &Data, reg: &Register) {
+	fn write_register(&mut self, data: Data, reg: Register) {
 		let reg_value = match reg {
 			Register::A(a) => self.a[a.get()],
 			Register::D(d) => self.d[d.get()],
 		};
-		let value = match *data {
+		let value = match data {
 			Data::Byte(v) => (reg_value & 0xFFFFFF00) | (v as u32),
 			Data::Word(v) => (reg_value & 0xFFFF0000) | (v as u32),
 			Data::Long(v) => v,
 		};
 		match reg {
-			Register::A(a) => self.a[a.get()] = value,
+			Register::A(a) => {
+				if a.get() < 7 {
+					self.a[a.get()] = value
+				}
+				else if self.status_register & 0x2000 == 0x2000 {
+					self.ssp = value
+				}
+				else {
+					self.usp = value
+				}
+			},
 			Register::D(d) => self.d[d.get()] = value,
 		};
 	}
@@ -198,26 +222,29 @@ impl CPU {
 	}
 	
 	// Assumes the program counter has advanced to the extension word, and advances it past it if applicable.
-	fn read_with_mode(&mut self, addr_mode: &AddrMode, size: &Size) -> Data {
+	fn read_with_mode(&mut self, addr_mode: AddrMode, size: Size, advance: bool) -> Data {
 		match addr_mode {
 			AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_)
 			| AddrMode::AddressWithDisp(_) | AddrMode::AddressWithIndex(_)
 			| AddrMode::PCWithDisp | AddrMode::PCWithIndex | AddrMode::AbsoluteShort
 			| AddrMode::AbsoluteLong => {
-				let address = self.calc_addr(&addr_mode, &size);
-				self.read(address, &size)
+				let address = self.calc_addr(addr_mode, size, advance);
+				self.read(address, size)
 			},
 			AddrMode::DataReg(reg) => {
-				self.read_register(&size, &Register::new(*reg as usize, false))
+				self.read_register(Register::new(reg as usize, false), size)
 			},
 			AddrMode::AddressReg(reg) => {
-				self.read_register(&size, &Register::new(*reg as usize, true))
+				self.read_register(Register::new(reg as usize, true), size)
 			}
 			AddrMode::Immediate => {
 				let data = match size {
-					Size::Byte => self.read(self.program_counter + 1, &Size::Byte), // data is stored in the low byte of extension word
-					Size::Word => self.read(self.program_counter, &Size::Word),
-					Size::Long => self.read(self.program_counter, &Size::Long),
+					Size::Byte => self.read(self.program_counter + 1, Size::Byte), // data is stored in the low byte of extension word
+					Size::Word => self.read(self.program_counter, Size::Word),
+					Size::Long => self.read(self.program_counter, Size::Long),
+				};
+				if advance {
+					self.program_counter += Ord::max(size.length(), 2);
 				};
 				data
 			},
@@ -225,111 +252,113 @@ impl CPU {
 		}
 	}
 	
-	fn read_with_mode_u8(&mut self, addr_mode: &AddrMode) -> u8 {
-		let Data::Byte(data) = self.read_with_mode(addr_mode, &Size::Byte)
+	fn read_with_mode_u8(&mut self, addr_mode: AddrMode, advance: bool) -> u8 {
+		let Data::Byte(data) = self.read_with_mode(addr_mode, Size::Byte, advance)
 		else {
 			panic!("read_with_mode_u8 returned a non-byte value.");
 		};
 		return data;
 	}
 	
-	fn read_with_mode_u16(&mut self, addr_mode: &AddrMode) -> u16 {
-		let Data::Word(data) = self.read_with_mode(addr_mode, &Size::Word)
+	fn read_with_mode_u16(&mut self, addr_mode: AddrMode, advance: bool) -> u16 {
+		let Data::Word(data) = self.read_with_mode(addr_mode, Size::Word, advance)
 		else {
 			panic!("read_with_mode_u16 returned a non-word value.");
 		};
 		return data;
 	}
 	
-	fn read_with_mode_u32(&mut self, addr_mode: &AddrMode) -> u32 {
-		let Data::Long(data) = self.read_with_mode(addr_mode, &Size::Long)
+	fn read_with_mode_u32(&mut self, addr_mode: AddrMode, advance: bool) -> u32 {
+		let Data::Long(data) = self.read_with_mode(addr_mode, Size::Long, advance)
 		else {
 			panic!("read_with_mode_u32 returned a non-long value.");
 		};
 		return data;
 	}
 	
-	fn write_with_mode(&mut self, addr_mode: &AddrMode, data: &Data) {
+	fn write_with_mode(&mut self, addr_mode: AddrMode, data: Data, advance: bool) {
 		match addr_mode {
 			AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_)
 			| AddrMode::AddressWithDisp(_) | AddrMode::AddressWithIndex(_)
 			| AddrMode::PCWithDisp | AddrMode::PCWithIndex | AddrMode::AbsoluteShort
 			| AddrMode::AbsoluteLong => {
-				let address = self.calc_addr(&addr_mode, &Size::from_data(&data));
-				self.write(address, &data);
+				let address = self.calc_addr(addr_mode, Size::from_data(data), advance);
+				self.write(address, data);
 			},
 			AddrMode::DataReg(reg) => {
-				self.write_register(&data, &Register::new(*reg as usize, false))
+				self.write_register(data, Register::new(reg as usize, false))
 			},
 			AddrMode::AddressReg(reg) => {
-				self.write_register(&data, &Register::new(*reg as usize, true))
-			}
+				self.write_register(data, Register::new(reg as usize, true))
+			},
 			_ => panic!("Unimplemented write addressing mode {:?}.", addr_mode),
 		}
 	}
 	
-	fn calc_addr(&self, addr_mode: &AddrMode, size: &Size) -> u32 {
+	fn calc_addr(&mut self, addr_mode: AddrMode, size: Size, advance: bool) -> u32 {
 		match addr_mode {
 			AddrMode::Address(reg) => {
-				self.read_register_u32(&Register::new(*reg, true))
+				self.read_register_u32(Register::new(reg, true))
 			},
 			AddrMode::AddressWithPostinc(reg) => {
-				let reg = Register::new(*reg, true);
-				let address = self.read_register_u32(&reg);
+				let register = Register::new(reg, true);
+				let address = self.read_register_u32(register);
+				if advance {
+					// Stack pointer always increments by a minimum of 2 bytes
+					if reg == 7 && size == Size::Byte {
+						self.write_register(Data::Long(address + 2), register)
+					}
+					else {
+						self.write_register(Data::Long(address + size.length()), register);
+					}
+				}
 				address
 			},
 			AddrMode::AddressWithPredec(reg) => {
-				let reg = Register::new(*reg, true);
-				let address = self.read_register_u32(&reg);
+				let register = Register::new(reg, true);
+				let address = self.read_register_u32(register);
+				if advance {
+					// Stack pointer always decrements by a minimum of 2 bytes
+					if reg == 7 && size == Size::Byte {
+						self.write_register(Data::Long(address - 2), register)
+					}
+					else {
+						self.write_register(Data::Long(address - size.length()), register);
+					};
+				};
 				address - size.length()
 			},
 			AddrMode::AddressWithDisp(reg) => {
 				let disp: i32 = CPU::sign_extend_u16(self.read_u16(self.program_counter));
-				let address = self.read_register_u32(&Register::new(*reg, true));
+				let address = self.read_register_u32(Register::new(reg, true));
+				if advance {
+					self.program_counter += 2;
+				};
 				address.wrapping_add_signed(disp)
 			},
 			AddrMode::PCWithDisp => {
 				let disp: i32 = CPU::sign_extend_u16(self.read_u16(self.program_counter));
-				self.program_counter.wrapping_add_signed(disp)
+				let address = self.program_counter.wrapping_add_signed(disp);
+				if advance {
+					self.program_counter += 2;
+				};
+				address
 			},
 			AddrMode::AbsoluteShort => {
 				let address = 0u32.wrapping_add_signed(CPU::sign_extend_u16(self.read_u16(self.program_counter)));
+				if advance {
+					self.program_counter += 2;
+				};
 				address
 			},
 			AddrMode::AbsoluteLong => {
 				let address = self.read_u32(self.program_counter);
+				if advance {
+					self.program_counter += 4;
+				};
 				address
 			},
 			_ => panic!("Unimplemented address calculation addressing mode {:?}.", addr_mode),
-		}
-	}
-	
-	// Carry out all side effects of the address mode, like advancing the program counter or altering a register
-	fn advance_with_mode(&mut self, addr_mode: &AddrMode, size: &Size) {
-		match addr_mode {
-			AddrMode::DataReg(_) | AddrMode::AddressReg(_) | AddrMode::Address(_) => {
-				
-			},
-			AddrMode::AddressWithPostinc(reg) => {
-				let reg = Register::new(*reg, true);
-				let address = self.read_register_u32(&reg);
-				self.write_register(&Data::Long(address + size.length()), &reg);
-			},
-			AddrMode::AddressWithPredec(reg) => {
-				let reg = Register::new(*reg, true);
-				let address = self.read_register_u32(&reg);
-				self.write_register(&Data::Long(address - size.length()), &reg);
-			},
-			AddrMode::AddressWithDisp(_) | AddrMode::PCWithDisp | AddrMode::AbsoluteShort => {
-				self.program_counter += 2;
-			},
-			AddrMode::AbsoluteLong => {
-				self.program_counter += 4;
-			},
-			AddrMode::Immediate => {
-				self.program_counter += Ord::max(size.length(), 2);
-			},
-			_ => panic!("Unimplemented addressing mode advance {:?}.", addr_mode),
 		}
 	}
 	
@@ -376,8 +405,288 @@ impl CPU {
 	}
 	
 	#[bitmatch]
+	pub fn run_opcode(&mut self) -> () {
+		print!("{:#010X} ", self.program_counter);
+		let opcode = self.decode_opcode();
+		self.program_counter += 2;
+		match opcode {
+			Opcode::AndI { size, addr_mode } => {
+				let imm = self.read_with_mode(AddrMode::Immediate, size, true);
+				let data = self.read_with_mode(addr_mode, size, false);
+				let data = match (imm, data) {
+					(Data::Byte(a), Data::Byte(b)) => Data::Byte(a & b),
+					(Data::Word(a), Data::Word(b)) => Data::Word(a & b),
+					(Data::Long(a), Data::Long(b)) => Data::Long(a & b),
+					_ => panic!("Non-matching data in ANDI"),
+				};
+				self.write_with_mode(addr_mode, data, true);
+				println!("ANDI {},{} = {}", imm, addr_mode, data);
+			}
+			Opcode::MoveA { size, dest, source } => {
+				let data = self.read_with_mode(source, size, true);
+				self.write_register(data.sign_extend(), Register::from_areg(dest));
+				println!("MOVEA {},A{} = {}", source, dest.get(), data);
+			}
+			Opcode::Move { size, dest, source } => {
+				let data = self.read_with_mode(source, size, true);
+				self.write_with_mode(dest, data, true);
+				println!("MOVE {},{} = {}", source, dest, data);
+			},
+			Opcode::MoveToSr { addr_mode } => {
+				self.status_register = self.read_with_mode_u16(addr_mode, true);
+				println!("MOVE {},SR = {:#06X}", addr_mode, self.status_register);
+			},
+			Opcode::Tst { size, addr_mode } => {
+				let data = self.read_with_mode(addr_mode, size, true);
+				self.set_v(false);
+				self.set_c(false);
+				match data {
+					Data::Byte(val) => {
+						self.set_n((val as i8) < 0);
+						self.set_z((val as i8) == 0);
+					}
+					Data::Word(val) => {
+						self.set_n((val as i16) < 0);
+						self.set_z((val as i16) == 0);
+					}
+					Data::Long(val) => {
+						self.set_n((val as i32) < 0);
+						self.set_z((val as i32) == 0);
+					}
+				}
+				println!("TST {} = CCR {:#04X}", addr_mode, self.status_register);
+			},
+			Opcode::MoveUsp { dir, a } => {
+				match dir {
+					MoveDirection::RegToMem => {
+						let data = self.read_register_u32(Register::from_areg(a));
+						self.usp = data;
+						println!("MOVE {},USP", a);
+					}
+					MoveDirection::MemToReg => {
+						self.write_register(Data::Long(self.usp), Register::from_areg(a));
+						println!("MOVE USP,{}", a);
+					}
+				};
+			},
+			Opcode::Jmp { addr_mode } => {
+				self.program_counter = self.calc_addr(addr_mode, Size::Long, true);
+				println!("JMP {}", addr_mode);
+			}
+			Opcode::MoveM { dir, size, addr_mode } => {
+				let reg_bits = self.read_u16(self.program_counter);
+				self.program_counter += 2;
+				let reg_list = match addr_mode {
+					AddrMode::AddressWithPredec(_) => {
+						[Register::new(0, false)
+						,Register::new(1, false)
+						,Register::new(2, false)
+						,Register::new(3, false)
+						,Register::new(4, false)
+						,Register::new(5, false)
+						,Register::new(6, false)
+						,Register::new(7, false)
+						,Register::new(0, true)
+						,Register::new(1, true)
+						,Register::new(2, true)
+						,Register::new(3, true)
+						,Register::new(4, true)
+						,Register::new(5, true)
+						,Register::new(6, true)
+						,Register::new(7, true)]
+					},
+					_ => {
+						[Register::new(7, true)
+						,Register::new(6, true)
+						,Register::new(5, true)
+						,Register::new(4, true)
+						,Register::new(3, true)
+						,Register::new(2, true)
+						,Register::new(1, true)
+						,Register::new(0, true)
+						,Register::new(7, false)
+						,Register::new(6, false)
+						,Register::new(5, false)
+						,Register::new(4, false)
+						,Register::new(3, false)
+						,Register::new(2, false)
+						,Register::new(1, false)
+						,Register::new(0, false)]
+					}
+				};
+				let reg_flags = #[bitmatch] match reg_bits {
+					"abcd_efgh_ijkl_mnop" => {
+						[a == 1, b == 1, c == 1, d == 1, e == 1, f == 1, g == 1, h == 1
+						, i == 1, j == 1, k == 1, l == 1, m == 1, n == 1, o == 1, p == 1]
+					}
+				};
+				let mut address = self.calc_addr(addr_mode, size, true);
+				match dir {
+					MoveDirection::RegToMem => {
+						for i in 15..=0 {
+							if reg_flags[i] {
+								if let AddrMode::AddressWithPredec(_) = addr_mode {
+									address -= size.length();
+								};
+								self.write(address, self.read_register(reg_list[i], size));
+								if let AddrMode::AddressWithPredec(_) = addr_mode { }
+								else {
+									address += size.length();
+								};
+							}
+						};
+						if let AddrMode::AddressWithPredec(reg) = addr_mode {
+							self.write_register(Data::Long(address), Register::new(reg, true));
+						};
+						println!("MOVEM {:#06X},{}", reg_bits, addr_mode);
+					},
+					MoveDirection::MemToReg => {
+						for i in 15..=0 {
+							if reg_flags[i] {
+								let data = self.read(address, size);
+								self.write_register(self.read(address, size), reg_list[i]);
+								address += size.length();
+							}
+						};
+						if let AddrMode::AddressWithPostinc(reg) = addr_mode {
+							self.write_register(Data::Long(address), Register::new(reg, true));
+						};
+						println!("MOVEM {},{:#06X}", addr_mode, reg_bits);
+					}
+				};
+			},
+			Opcode::Lea { dest, addr_mode } => {
+				let address = self.calc_addr(addr_mode, Size::Long, true);
+				self.write_register(Data::Long(address), Register::new(dest.get(), true));
+				println!("LEA {},A{} = {:#010X}", addr_mode, dest.get(), address);
+			},
+			Opcode::AddQ { data, size, addr_mode } => {
+				let value = self.read_with_mode(addr_mode, size, false);
+				let new_value = match value {
+					Data::Byte(d) => Data::Byte(d.wrapping_add(data)),
+					Data::Word(d) => Data::Word(d.wrapping_add(data.into())),
+					Data::Long(d) => Data::Long(d.wrapping_add(data.into())),
+				};
+				self.set_x(value.is_negative() && !new_value.is_negative());
+				self.set_n(new_value.is_negative());
+				self.set_z(new_value.is_zero());
+				self.set_v(!value.is_negative() && new_value.is_negative());
+				self.set_c(value.is_negative() && !new_value.is_negative());
+				self.write_with_mode(addr_mode, new_value, true);
+				println!("ADDQ #{data},{addr_mode}")
+			}
+			Opcode::DBcc { cond, loop_down } => {
+				let disp = CPU::sign_extend_u16(self.read_u16(self.program_counter));
+				let mut loop_count = self.read_register_u16(Register::from_dreg(loop_down));
+				if !cond.check(self.get_ccr_flags()) {
+					loop_count = loop_count.wrapping_add_signed(-1);
+					self.write_register(Data::Word(loop_count), Register::from_dreg(loop_down));
+					if loop_count & 0x8000 == 0 { // If loop count is positive
+						self.program_counter = self.program_counter.wrapping_add_signed(disp);
+					}
+					else {
+						self.program_counter += 2;
+					}
+				}
+				else {
+					self.program_counter += 2;
+				}
+				println!("DB{cond},{loop_down} = PC {:#010X}, {loop_down} = {loop_count:#06X}", self.program_counter);
+			}
+			Opcode::Bcc { cond, disp } => {
+				let displacement = if disp == 0 {
+					let long_disp = CPU::sign_extend_u16(self.read_u16(self.program_counter));
+					long_disp
+				}
+				else {
+					disp
+				};
+				if cond.check(self.get_ccr_flags()) {
+					self.program_counter = self.program_counter.wrapping_add_signed(displacement);
+				}
+				else if disp == 0 {
+					self.program_counter += 2;
+				}
+				println!("B{cond} = PC {:#010X}", self.program_counter);
+			},
+			Opcode::MoveQ { dest, data } => {
+				self.write_register(Data::Long(CPU::sign_extend_u8(data) as u32), Register::from_dreg(dest));
+				let d = dest.get();
+				println!("MOVEQ = D{} {:#010X}", d, self.d[d]);
+			},
+			Opcode::LsdToD { rot, dir, size, mode, reg } => {
+				let rotation = match mode {
+					RotateMode::Immediate => if rot == 0 { 8 } else { rot },
+					RotateMode::Register => self.read_register_u8(Register::new(rot as usize, false)) % 64,
+				};
+				let register = Register::from_dreg(reg);
+				let data = self.read_register(register, size);
+				// Rust REALLY does not like shifting past the size of the integer.
+				// I don't love handling this way but since the shift is limited to 63 bits,
+				// it's probably easiest to just temporarily cast to a u64.
+				let mut wide_data = match data {
+					Data::Byte(d) => d as u64,
+					Data::Word(d) => d as u64,
+					Data::Long(d) => d as u64,
+				};
+				if rotation > 0 {
+					match dir {
+						RotateDirection::Right => {
+							wide_data = wide_data >> (rotation - 1);
+							let carry_bit = (wide_data & 0x1) == 0x1;
+							self.set_c(carry_bit);
+							self.set_x(carry_bit);
+							wide_data = wide_data >> 1;
+						},
+						RotateDirection::Left => {
+							wide_data = wide_data << (rotation - 1);
+							let bitmask = match size {
+								Size::Byte => 0x80,
+								Size::Word => 0x8000,
+								Size::Long => 0x80000000,
+							};
+							let carry_bit = (wide_data & bitmask) == bitmask;
+							self.set_c(carry_bit);
+							self.set_x(carry_bit);
+							wide_data = wide_data << 1;
+						}
+					}
+				}
+				else {
+					self.set_c(false);
+				}
+				let new_data = match size {
+					Size::Byte => {
+						let new_val = wide_data as u8;
+						self.set_z(new_val == 0);
+						self.set_n((new_val & 0x80) == 0x80);
+						Data::Byte(new_val)
+					},
+					Size::Word => {
+						let new_val = wide_data as u16;
+						self.set_z(new_val == 0);
+						self.set_n((new_val & 0x8000) == 0x8000);
+						Data::Word(new_val)
+					},
+					Size::Long => {
+						let new_val = wide_data as u32;
+						self.set_z(new_val == 0);
+						self.set_n((new_val & 0x80000000) == 0x80000000);
+						Data::Long(new_val)
+					},
+				};
+				self.set_v(false);
+				self.write_register(new_data, register);
+				println!("LS{dir} {mode}{rot},{reg}");
+			},
+			_ => panic!("{opcode} unimplemented."),
+		}
+	}
+	
+	#[bitmatch]
 	fn decode_opcode(&self) -> Opcode {
 		let opcode = self.read_u16(self.program_counter);
+		print!("{:#06X} ", opcode);
 		#[bitmatch]
 		match opcode {
 			// ORI to CCR
@@ -698,10 +1007,46 @@ impl CPU {
 					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8)
 				}
 			},
+			// DBcc
+			"0101_cccc_1100_1ddd" => {
+				Opcode::DBcc {
+					cond: Condition::new(c),
+					loop_down: DReg::new(d),
+				}
+			},
+			// Scc
+			"0101_cccc_11mm_mxxx" => {
+				Opcode::Scc {
+					cond: Condition::new(c),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8)
+				}
+			},
+			// ADDQ
+			"0101_ddd0_ssmm_mxxx" => {
+				Opcode::AddQ {
+					data: d as u8,
+					size: Size::from_low_bits(s),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8)
+				}
+			},
+			// SUBQ
+			"0101_ddd1_ssmm_mxxx" => {
+				Opcode::SubQ {
+					data: d as u8,
+					size: Size::from_low_bits(s),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8)
+				}
+			},
+			// BSR
+			"0110_0001_dddd_dddd" => {
+				Opcode::BSR {
+					disp: CPU::sign_extend_u16(d)
+				}
+			}
 			// Bcc
-			"0110_bbbb_dddd_dddd" => {
+			"0110_cccc_dddd_dddd" => {
 				Opcode::Bcc {
-					cond: Condition::new(b),
+					cond: Condition::new(c),
 					disp: CPU::sign_extend_u16(d)
 				}
 			},
@@ -712,197 +1057,264 @@ impl CPU {
 					data: v as u8,
 				}
 			},
-			_ => panic!("Encountered unimplemented opcode {:#04X} located at {:#08X}", opcode, self.program_counter),
-		}
-	}
-	
-	#[bitmatch]
-	pub fn run_opcode(&mut self) -> () {
-		let opcode = self.decode_opcode();
-		print!("{:#010X} ", self.program_counter);
-		self.program_counter += 2;
-		match opcode {
-			Opcode::AndI { size, addr_mode } => {
-				let imm = self.read_with_mode(&AddrMode::Immediate, &size);
-				self.advance_with_mode(&AddrMode::Immediate, &size);
-				let data = self.read_with_mode(&addr_mode, &size);
-				let data = match (&imm, data) {
-					(Data::Byte(a), Data::Byte(b)) => Data::Byte(a & b),
-					(Data::Word(a), Data::Word(b)) => Data::Word(a & b),
-					(Data::Long(a), Data::Long(b)) => Data::Long(a & b),
-					_ => panic!("Non-matching data in ANDI"),
-				};
-				self.write_with_mode(&addr_mode, &data);
-				self.advance_with_mode(&addr_mode, &size);
-				println!("ANDI {},{} = {}", imm, addr_mode, data);
-			}
-			Opcode::MoveA { size, dest, source } => {
-				let data = self.read_with_mode(&source, &size);
-				self.advance_with_mode(&source, &size);
-				self.write_register(&data.sign_extend(), &Register::from_areg(&dest));
-				println!("MOVEA {},A{} = {}", source, dest.get(), data);
-			}
-			Opcode::Move { size, dest, source } => {
-				let data = self.read_with_mode(&source, &size);
-				self.advance_with_mode(&source, &size);
-				self.write_with_mode(&dest, &data);
-				self.advance_with_mode(&dest, &Size::from_data(&data));
-				println!("MOVE {},{} = {}", source, dest, data);
-			},
-			Opcode::MoveToSr { addr_mode } => {
-				self.status_register = self.read_with_mode_u16(&addr_mode);
-				self.advance_with_mode(&addr_mode, &Size::Word);
-				println!("MOVE {},SR = {:#06X}", addr_mode, self.status_register);
-			},
-			Opcode::Tst { size, addr_mode } => {
-				let data = self.read_with_mode(&addr_mode, &size);
-				self.advance_with_mode(&addr_mode, &size);
-				self.set_v(false);
-				self.set_c(false);
-				match data {
-					Data::Byte(val) => {
-						self.set_n((val as i8) < 0);
-						self.set_z((val as i8) == 0);
-					}
-					Data::Word(val) => {
-						self.set_n((val as i16) < 0);
-						self.set_z((val as i16) == 0);
-					}
-					Data::Long(val) => {
-						self.set_n((val as i32) < 0);
-						self.set_z((val as i32) == 0);
-					}
+			// DIVU
+			"1000_ddd0_11mm_mxxx" => {
+				Opcode::DivU {
+					dest: DReg::new(d),
+					source: self.decode_addressing_mode(((m << 3) + x) as u8),
 				}
-				println!("TST {} = CCR {:#04X}", addr_mode, self.status_register);
 			},
-			Opcode::MoveM { dir, size, addr_mode } => {
-				let reg_bits = self.read_u16(self.program_counter);
-				self.program_counter += 2;
-				let reg_list = match addr_mode {
-					AddrMode::AddressWithPredec(_) => {
-						[Register::new(0, false)
-						,Register::new(1, false)
-						,Register::new(2, false)
-						,Register::new(3, false)
-						,Register::new(4, false)
-						,Register::new(5, false)
-						,Register::new(6, false)
-						,Register::new(7, false)
-						,Register::new(0, true)
-						,Register::new(1, true)
-						,Register::new(2, true)
-						,Register::new(3, true)
-						,Register::new(4, true)
-						,Register::new(5, true)
-						,Register::new(6, true)
-						,Register::new(7, true)]
-					},
-					_ => {
-						[Register::new(7, true)
-						,Register::new(6, true)
-						,Register::new(5, true)
-						,Register::new(4, true)
-						,Register::new(3, true)
-						,Register::new(2, true)
-						,Register::new(1, true)
-						,Register::new(0, true)
-						,Register::new(7, false)
-						,Register::new(6, false)
-						,Register::new(5, false)
-						,Register::new(4, false)
-						,Register::new(3, false)
-						,Register::new(2, false)
-						,Register::new(1, false)
-						,Register::new(0, false)]
-					}
-				};
-				let reg_flags = #[bitmatch] match reg_bits {
-					"abcd_efgh_ijkl_mnop" => {
-						[a == 1, b == 1, c == 1, d == 1, e == 1, f == 1, g == 1, h == 1
-						, i == 1, j == 1, k == 1, l == 1, m == 1, n == 1, o == 1, p == 1]
-					}
-				};
-				let mut address = self.calc_addr(&addr_mode, &size);
-				self.advance_with_mode(&addr_mode, &size);
-				match dir {
-					MoveDirection::RegToMem => {
-						for i in 15..=0 {
-							if reg_flags[i] {
-								if let AddrMode::AddressWithPredec(_) = addr_mode {
-									address -= size.length();
-								};
-								self.write(address, &self.read_register(&size, &reg_list[i]));
-								if let AddrMode::AddressWithPredec(_) = addr_mode { }
-								else {
-									address += size.length();
-								};
-							}
-						};
-						if let AddrMode::AddressWithPredec(reg) = addr_mode {
-							self.write_register(&Data::Long(address), &Register::new(reg, true));
-						};
-						println!("MOVEM {:#06X},{}", reg_bits, addr_mode);
-					},
-					MoveDirection::MemToReg => {
-						for i in 15..=0 {
-							if reg_flags[i] {
-								let data = self.read(address, &size);
-								self.write_register(&self.read(address, &size), &reg_list[i]);
-								address += size.length();
-							}
-						};
-						if let AddrMode::AddressWithPostinc(reg) = addr_mode {
-							self.write_register(&Data::Long(address), &Register::new(reg, true));
-						};
-						println!("MOVEM {},{:#06X}", addr_mode, reg_bits);
-					}
-				};
-			},
-			Opcode::Lea { dest, addr_mode } => {
-				let address = self.calc_addr(&addr_mode, &Size::Long);
-				self.advance_with_mode(&addr_mode, &Size::Long);
-				self.write_register(&Data::Long(address), &Register::new(dest.get(), true));
-				println!("LEA {},A{} = {:#010X}", addr_mode, dest.get(), address);
-			},
-			Opcode::Bcc { cond, disp } => {
-				let f = self.get_ccr_flags();
-				let disp = if disp == 0 {
-					let long_disp = CPU::sign_extend_u16(self.read_u16(self.program_counter));
-					self.program_counter += 2;
-					long_disp
+			// DIVS
+			"1000_ddd1_11mm_mxxx" => {
+				Opcode::DivS {
+					dest: DReg::new(d),
+					source: self.decode_addressing_mode(((m << 3) + x) as u8),
 				}
-				else {
-					disp
-				};
-				let branch = match cond {
-					Condition::True => true,
-					Condition::False => panic!("BSR unimplemented."),
-					Condition::Higher => !f.c && !f.z,
-					Condition::LowerOrSame => f.c || f.z,
-					Condition::CarryClear => !f.c,
-					Condition::CarrySet => f.c,
-					Condition::NotEqual => !f.z,
-					Condition::Equal => f.z,
-					Condition::OverflowClear => !f.v,
-					Condition::OverflowSet => f.v,
-					Condition::Plus => !f.n,
-					Condition::Minus => f.n,
-					Condition::GreaterOrEqual => (f.n && f.v) || (!f.n && !f.v), 
-					Condition::LessThan => (f.n && !f.v) || (!f.n && f.v),
-					Condition::GreaterThan => (f.n && f.v && !f.z) || (!f.n && !f.v && !f.z),
-					Condition::LessOrEqual => f.z || (f.n && !f.v) || (!f.n && f.v),
-				};
-				if branch {
-					self.program_counter = self.program_counter.wrapping_add_signed(disp);
-				};
-				println!("B{cond} = PC {:#010X}", self.program_counter);
 			},
-			Opcode::MoveQ { dest, data } => {
-				self.write_register(&Data::Long(CPU::sign_extend_u8(data) as u32), &Register::from_dreg(&dest));
-				let d = dest.get();
-				println!("MOVEQ = D{} {:#010X}", d, self.d[d]);
+			// SBCD
+			"1000_xxx1_0000_myyy" => {
+				Opcode::Sbcd {
+					dest: if m == 0 {
+						AddrMode::DataReg(x as usize)
+					}
+					else {
+						AddrMode::AddressWithPredec(x as usize)
+					},
+					source: if m == 0 {
+						AddrMode::DataReg(y as usize)
+					}
+					else {
+						AddrMode::AddressWithPredec(y as usize)
+					},
+				}
 			},
-			_ => panic!("{opcode} unimplemented."),
+			// OR
+			"1000_dddr_ssmm_mxxx" => {
+				Opcode::Or {
+					reg: DReg::new(d),
+					dir: BinOpDirection::new(r == 1),
+					size: Size::from_low_bits(s),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// SUB
+			"1001_dddr_ssmm_mxxx" => {
+				Opcode::Sub {
+					reg: DReg::new(d),
+					dir: BinOpDirection::new(r == 1),
+					size: Size::from_low_bits(s),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// SUBX
+			"1001_xxx1_ss00_myyy" => {
+				Opcode::SubX {
+					dest: if m == 0 {
+						AddrMode::DataReg(x as usize)
+					}
+					else {
+						AddrMode::AddressWithPredec(x as usize)
+					},
+					size: Size::from_low_bits(s),
+					source: if m == 0 {
+						AddrMode::DataReg(y as usize)
+					}
+					else {
+						AddrMode::AddressWithPredec(y as usize)
+					},
+				}
+			},
+			// SUBA
+			"1001_aaas_11mm_mxxx" => {
+				Opcode::SubA {
+					dest: AReg::new(a),
+					size: Size::from_bit(s == 1),
+					source: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// EOR
+			"1011_ddd1_ssmm_mxxx" => {
+				Opcode::Eor {
+					dest: DReg::new(d),
+					size: Size::from_low_bits(s),
+					source: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// CMPM
+			"1011_aaa1_ss00_1bbb" => {
+				Opcode::CmpM {
+					dest: AReg::new(a),
+					size: Size::from_low_bits(s),
+					source: AReg::new(b),
+				}
+			},
+			// CMP
+			"1011_ddd0_ssmm_mxxx" => {
+				Opcode::Cmp {
+					dest: DReg::new(d),
+					size: Size::from_low_bits(s),
+					source: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// CMPA
+			"1011_aaas_11mm_mxxx" => {
+				Opcode::CmpA {
+					dest: AReg::new(a),
+					size: Size::from_bit(s == 1),
+					source: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// MULU
+			"1100_ddd0_11mm_mxxx" => {
+				Opcode::MulU {
+					dest: DReg::new(d),
+					source: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// MULS
+			"1100_ddd1_11mm_mxxx" => {
+				Opcode::MulS {
+					dest: DReg::new(d),
+					source: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// ABCD
+			"1100_xxx1_0000_oyyy" => {
+				Opcode::Abcd {
+					dest: if o == 0 {
+						AddrMode::DataReg(x as usize)
+					}
+					else {
+						AddrMode::AddressWithPredec(x as usize)
+					},
+					source: if o == 0 {
+						AddrMode::DataReg(y as usize)
+					}
+					else {
+						AddrMode::AddressWithPredec(y as usize)
+					},
+				}
+			},
+			// EXG
+			"1100_xxx1_mm00_myyy" => {
+				Opcode::Exg {
+					first: Register::new(x as usize, m & 0x1 == 0x1),
+					second: Register::new(y as usize, m & 0x1 == (m & 0x2 >> 1)),
+				}
+			},
+			// AND
+			"1100_dddr_ssmm_mxxx" => {
+				Opcode::And {
+					reg: DReg::new(d),
+					dir: BinOpDirection::new(r == 1),
+					size: Size::from_low_bits(s),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// ADD
+			"1101_dddr_ssmm_mxxx" => {
+				Opcode::Add {
+					reg: DReg::new(d),
+					dir: BinOpDirection::new(r == 1),
+					size: Size::from_low_bits(s),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// ADDX
+			"1101_yyy1_ss00_mxxx" => {
+				Opcode::AddX {
+					dest: if m == 0 {
+						AddrMode::DataReg(x as usize)
+					}
+					else {
+						AddrMode::AddressWithPredec(x as usize)
+					},
+					size: Size::from_low_bits(s),
+					source: if m == 0 {
+						AddrMode::DataReg(y as usize)
+					}
+					else {
+						AddrMode::AddressWithPredec(y as usize)
+					},
+				}
+			},
+			// ADDA
+			"1101_aaas_11mm_mxxx" => {
+				Opcode::AddA {
+					dest: AReg::new(a),
+					size: Size::from_bit(s == 1),
+					source: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// ASd
+			"1110_000d_11mm_mxxx" => {
+				Opcode::Asd {
+					dir: RotateDirection::new(d == 1),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// LSd
+			"1110_001d_11mm_mxxx" => {
+				Opcode::Lsd {
+					dir: RotateDirection::new(d == 1),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// ROXd
+			"1110_010d_11mm_mxxx" => {
+				Opcode::RoXd {
+					dir: RotateDirection::new(d == 1),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// ROd
+			"1110_011d_11mm_mxxx" => {
+				Opcode::Rod {
+					dir: RotateDirection::new(d == 1),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
+			// ASd to D register
+			"1110_rrri_ssm0_0ddd" => {
+				Opcode::AsdToD {
+					rot: r as u8,
+					dir: RotateDirection::new(i == 1),
+					size: Size::from_low_bits(s),
+					mode: RotateMode::new(m == 1),
+					reg: DReg::new(d),
+				}
+			},
+			// LSd to D register
+			"1110_rrri_ssm0_1ddd" => {
+				Opcode::LsdToD {
+					rot: r as u8,
+					dir: RotateDirection::new(i == 1),
+					size: Size::from_low_bits(s),
+					mode: RotateMode::new(m == 1),
+					reg: DReg::new(d),
+				}
+			},
+			// ROXd to D register
+			"1110_rrri_ssm1_0ddd" => {
+				Opcode::RoXdToD {
+					rot: r as u8,
+					dir: RotateDirection::new(i == 1),
+					size: Size::from_low_bits(s),
+					mode: RotateMode::new(m == 1),
+					reg: DReg::new(d),
+				}
+			},
+			// ROd to D register
+			"1110_rrri_ssm1_1ddd" => {
+				Opcode::RodToD {
+					rot: r as u8,
+					dir: RotateDirection::new(i == 1),
+					size: Size::from_low_bits(s),
+					mode: RotateMode::new(m == 1),
+					reg: DReg::new(d),
+				}
+			},
+			_ => Opcode::Illegal
 		}
 	}
 	
@@ -925,8 +1337,10 @@ impl CPU {
 	
 	// Helper function for manually writing 68K test code.
 	#[cfg(test)]
-	pub fn write_rom(&mut self, data: u8) {
-		self.cart_memory[self.program_counter as usize] = data;
+	pub fn write_rom(&mut self, data: u16) {
+		self.cart_memory[self.program_counter as usize] = (data >> 8) as u8;
+		self.program_counter += 1;
+		self.cart_memory[self.program_counter as usize] = (data & 0xFF) as u8;
 		self.program_counter += 1;
 	}
 	
@@ -935,8 +1349,10 @@ impl CPU {
 	pub fn test_reset(&mut self) {
 		self.program_counter = CPU::load_u32_at(&self.cart_memory, 4);
 		self.status_register = 0x2000;
-		self.a = [0; 8];
+		self.a = [0; 7];
 		self.d = [0; 8];
 		self.ram = vec![0; RAM_SIZE];
+		self.usp = 0;
+		self.ssp = CPU::load_u32_at(&self.cart_memory, 0)
 	}
 }

@@ -6,7 +6,7 @@ pub const RAM_START: usize = 0xFF0000;
 pub const RAM_END: usize = RAM_START + RAM_SIZE;
 pub const ADDRESS_SPACE: usize = 0xFFFFFF;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Size {
 	Byte,
 	Word,
@@ -47,7 +47,7 @@ impl Size {
 		}
 	}
 	
-	pub fn from_data(data: &Data) -> Size {
+	pub fn from_data(data: Data) -> Size {
 		match data {
 			Data::Byte(_) => Size::Byte,
 			Data::Word(_) => Size::Word,
@@ -56,18 +56,34 @@ impl Size {
 	}
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Data {
 	Byte(u8),
 	Word(u16),
 	Long(u32)
 }
 impl Data {
-	pub fn sign_extend(&self) -> Data {
+	pub fn sign_extend(self) -> Data {
 		match self {
-			Data::Byte(d) => Data::Long(((*d as i8) as i32) as u32),
-			Data::Word(d) => Data::Long(((*d as i16) as i32) as u32),
-			Data::Long(d) => Data::Long(*d)
+			Data::Byte(d) => Data::Long(((d as i8) as i32) as u32),
+			Data::Word(d) => Data::Long(((d as i16) as i32) as u32),
+			Data::Long(d) => Data::Long(d)
+		}
+	}
+	
+	pub fn is_negative(self) -> bool {
+		match self {
+			Data::Byte(d) => d & 0x80 == 0x80,
+			Data::Word(d) => d & 0x8000 == 0x8000,
+			Data::Long(d) => d & 0x80000000 == 0x80000000
+		}
+	}
+	
+	pub fn is_zero(self) -> bool {
+		match self {
+			Data::Byte(d) => d == 0,
+			Data::Word(d) => d == 0,
+			Data::Long(d) => d == 0,
 		}
 	}
 }
@@ -81,6 +97,7 @@ impl fmt::Display for Data {
 	}
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct AReg { i: usize }
 impl AReg {
 	pub fn new(reg: u16) -> AReg {
@@ -94,7 +111,13 @@ impl AReg {
 		self.i
 	}
 }
+impl fmt::Display for AReg {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "A{}", self.i)
+	}
+}
 
+#[derive(Debug, Clone, Copy)]
 pub struct DReg { i: usize }
 impl DReg {
 	pub fn new(reg: u16) -> DReg {
@@ -108,7 +131,13 @@ impl DReg {
 		self.i
 	}
 }
+impl fmt::Display for DReg {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "D{}", self.i)
+	}
+}
 
+#[derive(Debug, Clone, Copy)]
 pub enum Register {
 	A(AReg),
 	D(DReg),
@@ -125,12 +154,20 @@ impl Register {
 		Register::new(reg as usize, is_a)
 	}
 	
-	pub fn from_areg(a: &AReg) -> Register {
+	pub fn from_areg(a: AReg) -> Register {
 		Register::A(AReg::new(a.get() as u16))
 	}
 	
-	pub fn from_dreg(d: &DReg) -> Register {
+	pub fn from_dreg(d: DReg) -> Register {
 		Register::D(DReg::new(d.get() as u16))
+	}
+}
+impl fmt::Display for Register {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		match self {
+			Register::A(a) => write!(f, "{}", a),
+			Register::D(d) => write!(f, "{}", d),
+		}
 	}
 }
 
@@ -153,6 +190,35 @@ impl RotateDirection {
 		match bit {
 			false => RotateDirection::Right,
 			true => RotateDirection::Left,
+		}
+	}
+}
+impl fmt::Display for RotateDirection {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		match self {
+			RotateDirection::Right => write!(f, "R"),
+			RotateDirection::Left => write!(f, "L"),
+		}
+	}
+}
+
+pub enum RotateMode {
+	Immediate,
+	Register,
+}
+impl RotateMode {
+	pub fn new(bit: bool) -> RotateMode {
+		match bit {
+			false => RotateMode::Immediate,
+			true => RotateMode::Register,
+		}
+	}
+}
+impl fmt::Display for RotateMode {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		match self {
+			RotateMode::Immediate => write!(f, "#"),
+			RotateMode::Register => write!(f, "D"),
 		}
 	}
 }
@@ -207,6 +273,7 @@ impl Condition {
 	pub fn new(bits: u16) -> Condition {
 		match bits {
 			0b0000 => Condition::True,
+			0b0001 => Condition::False,
 			0b0010 => Condition::Higher,
 			0b0011 => Condition::LowerOrSame,
 			0b0100 => Condition::CarryClear,
@@ -222,6 +289,27 @@ impl Condition {
 			0b1110 => Condition::GreaterThan,
 			0b1111 => Condition::LessOrEqual,
 			_ => panic!("{:#b} is not a valid branch condition.", bits),
+		}
+	}
+	
+	pub fn check(&self, f: Flags) -> bool {
+		match self {
+			Condition::True => true,
+			Condition::False => false,
+			Condition::Higher => !f.c && !f.z,
+			Condition::LowerOrSame => f.c || f.z,
+			Condition::CarryClear => !f.c,
+			Condition::CarrySet => f.c,
+			Condition::NotEqual => !f.z,
+			Condition::Equal => f.z,
+			Condition::OverflowClear => !f.v,
+			Condition::OverflowSet => f.v,
+			Condition::Plus => !f.n,
+			Condition::Minus => f.n,
+			Condition::GreaterOrEqual => (f.n && f.v) || (!f.n && !f.v), 
+			Condition::LessThan => (f.n && !f.v) || (!f.n && f.v),
+			Condition::GreaterThan => (f.n && f.v && !f.z) || (!f.n && !f.v && !f.z),
+			Condition::LessOrEqual => f.z || (f.n && !f.v) || (!f.n && f.v),
 		}
 	}
 }
@@ -248,7 +336,7 @@ impl fmt::Display for Condition {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum AddrMode {
 	DataReg(usize),
 	AddressReg(usize),
@@ -263,7 +351,6 @@ pub enum AddrMode {
 	AbsoluteLong,
 	Immediate
 }
-
 impl fmt::Display for AddrMode {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match self {
@@ -362,39 +449,40 @@ pub enum Opcode {
 	MoveM { dir: MoveDirection, size: Size, addr_mode: AddrMode },
 	Lea { dest: AReg, addr_mode: AddrMode },
 	Chk { source: DReg, addr_mode: AddrMode },
-	AddQ { data: u16, size: Size, addr_mode: AddrMode },
-	SubQ { data: u16, size: Size, addr_mode: AddrMode },
+	AddQ { data: u8, size: Size, addr_mode: AddrMode },
+	SubQ { data: u8, size: Size, addr_mode: AddrMode },
 	Scc { cond: Condition, addr_mode: AddrMode },
 	DBcc { cond: Condition, loop_down: DReg },
+	BSR { disp: i32 },
 	Bcc { cond: Condition, disp: i32 },
 	MoveQ { dest: DReg, data: u8 },
-	DivU,
-	DivS,
-	Sbcd,
-	Or,
-	Sub,
-	SubX,
-	SubA,
-	Eor,
-	CmpM,
-	Cmp,
-	CmpA,
-	MulU,
-	MulS,
-	Abcd,
-	Exg,
-	And,
-	Add,
-	AddX,
-	AddA,
-	Asd,
-	Lsd,
-	RoXd,
-	Rod,
-	AsdToD,
-	LsdToD,
-	RoXdToD,
-	RodToD,
+	DivU { dest: DReg, source: AddrMode },
+	DivS { dest: DReg, source: AddrMode },
+	Sbcd { dest: AddrMode, source: AddrMode },
+	Or { reg: DReg, dir: BinOpDirection, size: Size, addr_mode: AddrMode },
+	Sub { reg: DReg, dir: BinOpDirection, size: Size, addr_mode: AddrMode },
+	SubX { dest: AddrMode, size: Size, source: AddrMode },
+	SubA { dest: AReg, size: Size, source: AddrMode },
+	Eor { dest: DReg, size: Size, source: AddrMode },
+	CmpM { dest: AReg, size: Size, source: AReg },
+	Cmp { dest: DReg, size: Size, source: AddrMode },
+	CmpA { dest: AReg, size: Size, source: AddrMode },
+	MulU { dest: DReg, source: AddrMode },
+	MulS { dest: DReg, source: AddrMode },
+	Abcd { dest: AddrMode, source: AddrMode },
+	Exg { first: Register, second: Register },
+	And { reg: DReg, dir: BinOpDirection, size: Size, addr_mode: AddrMode },
+	Add { reg: DReg, dir: BinOpDirection, size: Size, addr_mode: AddrMode },
+	AddX { dest: AddrMode, size: Size, source: AddrMode },
+	AddA { dest: AReg, size: Size, source: AddrMode },
+	Asd { dir: RotateDirection, addr_mode: AddrMode },
+	Lsd { dir: RotateDirection, addr_mode: AddrMode },
+	RoXd { dir: RotateDirection, addr_mode: AddrMode },
+	Rod { dir: RotateDirection, addr_mode: AddrMode },
+	AsdToD { rot: u8, dir: RotateDirection, size: Size, mode: RotateMode, reg: DReg },
+	LsdToD { rot: u8, dir: RotateDirection, size: Size, mode: RotateMode, reg: DReg },
+	RoXdToD { rot: u8, dir: RotateDirection, size: Size, mode: RotateMode, reg: DReg },
+	RodToD { rot: u8, dir: RotateDirection, size: Size, mode: RotateMode, reg: DReg },
 }
 
 impl fmt::Display for Opcode {
@@ -457,6 +545,7 @@ impl fmt::Display for Opcode {
 			Opcode::SubQ { .. } => write!(f, "SUBQ"),
 			Opcode::Scc { .. } => write!(f, "Scc"),
 			Opcode::DBcc { .. } => write!(f, "DBcc"),
+			Opcode::BSR { .. } => write!(f, "BSR"),
 			Opcode::Bcc { .. } => write!(f, "Bcc"),
 			Opcode::MoveQ { .. } => write!(f, "MOVEQ"),
 			Opcode::DivU { .. } => write!(f, "DIVU"),
@@ -490,6 +579,7 @@ impl fmt::Display for Opcode {
 	}
 }
 
+#[derive(Clone, Copy)]
 pub struct Flags {
 	pub x: bool,
 	pub n: bool,
