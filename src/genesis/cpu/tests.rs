@@ -196,6 +196,11 @@ fn addq() {
 }
 
 #[test]
+fn subq() {
+	panic!("TODO");
+}
+
+#[test]
 fn bra() {
 	let mut cpu = test_cpu();
 	// BRA *+8
@@ -412,21 +417,21 @@ fn lsd_to_d() {
 	cpu.write_rom(0xE769);
 	cpu.write_rom(0xE868);
 	cpu.test_reset();
-	cpu.run_opcode();
-	cpu.run_opcode();
-	cpu.run_opcode();
-	cpu.run_opcode();
-	cpu.run_opcode();
-	cpu.run_opcode();
+	cpu.run_opcode(); // MOVE.L #$1234567F,D0
+	cpu.run_opcode(); // MOVE.L #$1234567F,D1
+	cpu.run_opcode(); // MOVE.L #$1234567F,D2
+	cpu.run_opcode(); // MOVE #12,D3
+	cpu.run_opcode(); // MOVE #0,D4
+	cpu.run_opcode(); // LSL.L #4,D0
 	assert!(cpu.d[0] == 0x234567F0, "Expected D0: 0x234567F0, actual value is {:#010X}", cpu.d[0]);
 	assert!((cpu.status_register & 0b11111) == 0b10001, "Expected CCR: 0b10001, actual value is {:#07b}", cpu.status_register);
-	cpu.run_opcode();
+	cpu.run_opcode(); // LSR.B #8,D2
 	assert!(cpu.d[2] == 0x12345600, "Expected D2: 0x12345600, actual value is {:#010X}", cpu.d[2]);
 	assert!((cpu.status_register & 0b11111) == 0b00100, "Expected CCR: 0b00100, actual value is {:#07b}", cpu.status_register);
-	cpu.run_opcode();
+	cpu.run_opcode(); // LSL.W D3,D1
 	assert!(cpu.d[1] == 0x1234F000, "Expected D1: 0x1234F000, actual value is {:#010X}", cpu.d[1]);
 	assert!((cpu.status_register & 0b11111) == 0b11001, "Expected CCR: 0b11001, actual value is {:#07b}", cpu.status_register);
-	cpu.run_opcode();
+	cpu.run_opcode(); // LSR.W D4,D0
 	assert!(cpu.d[0] == 0x234567F0, "Expected D0: 0x234567F0, actual value is {:#010X}", cpu.d[0]);
 	assert!((cpu.status_register & 0b11111) == 0b10000, "Expected CCR: 0b10000, actual value is {:#07b}", cpu.status_register);
 }

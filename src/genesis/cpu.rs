@@ -23,6 +23,8 @@ pub struct CPU {
 	controller1_control: u8,
 	controller2: Controller,
 	controller2_control: u8,
+	cycles: u64,
+	countdown: u64,
 }
 
 impl CPU {
@@ -45,7 +47,24 @@ impl CPU {
 			controller1_control: 0,
 			controller2: Controller::Unplugged,
 			controller2_control: 0,
+			cycles: 0,
+			countdown: 0,
 		}
+	}
+	
+	pub fn advance_cycle(&mut self) {
+		if self.countdown == 0 {
+			self.run_opcode();
+		}
+		else {
+			self.countdown -= 1;
+		}
+		self.cycles += 1;
+	}
+	
+	pub fn add_cycles(&mut self, cycles: u64) {
+		self.cycles += cycles;
+		self.countdown += cycles;
 	}
 	
 	fn read_u8(&self, address: u32) -> u8 {
@@ -178,7 +197,17 @@ impl CPU {
 	
 	fn write_register(&mut self, data: Data, reg: Register) {
 		let reg_value = match reg {
-			Register::A(a) => self.a[a.get()],
+			Register::A(a) => {
+				if a.get() < 7 {
+					self.a[a.get()]
+				}
+				else if self.status_register & 0x2000 == 0x2000 {
+					self.ssp
+				}
+				else {
+					self.usp
+				}
+			},
 			Register::D(d) => self.d[d.get()],
 		};
 		let value = match data {
@@ -362,6 +391,44 @@ impl CPU {
 		}
 	}
 	
+	fn calc_addr_cycles(&mut self, addr_mode: AddrMode, size: Size) -> u64 {
+		match addr_mode {
+			AddrMode::DataReg(_) | AddrMode::AddressReg(_) => {
+				0
+			},
+			AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::Immediate => {
+				match size {
+					Size::Long => 8,
+					_ => 4,
+				}
+			},
+			AddrMode::AddressWithPredec(_) => {
+				match size {
+					Size::Long => 10,
+					_ => 6,
+				}
+			},
+			AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort | AddrMode::PCWithDisp => {
+				match size {
+					Size::Long => 12,
+					_ => 8,
+				}
+			},
+			AddrMode::AddressWithIndex(_) | AddrMode::PCWithIndex => {
+				match size {
+					Size::Long => 14,
+					_ => 10,
+				}
+			},
+			AddrMode::AbsoluteLong => {
+				match size {
+					Size::Long => 16,
+					_ => 12,
+				}
+			}
+		}
+	}
+	
 	// SR helper functions. SR structure is T_S__III ___XNZVC.
 	
 	fn set_x(&mut self, val: bool) {
@@ -407,6 +474,7 @@ impl CPU {
 	#[bitmatch]
 	pub fn run_opcode(&mut self) -> () {
 		print!("{:#010X} ", self.program_counter);
+		let current_cycle = self.cycles;
 		let opcode = self.decode_opcode();
 		self.program_counter += 2;
 		match opcode {
@@ -420,6 +488,22 @@ impl CPU {
 					_ => panic!("Non-matching data in ANDI"),
 				};
 				self.write_with_mode(addr_mode, data, true);
+				let instr_cycles = match addr_mode {
+					AddrMode::DataReg(_) => {
+						match size {
+							Size::Long => 14,
+							_ => 8,
+						}
+					},
+					_ => {
+						match size {
+							Size::Long => 20,
+							_ => 12
+						}
+					}
+				};
+				let addr_cycles = self.calc_addr_cycles(addr_mode, size);
+				self.add_cycles(addr_cycles + instr_cycles);
 				println!("ANDI {},{} = {}", imm, addr_mode, data);
 			}
 			Opcode::MoveA { size, dest, source } => {
@@ -561,19 +645,48 @@ impl CPU {
 				println!("LEA {},A{} = {:#010X}", addr_mode, dest.get(), address);
 			},
 			Opcode::AddQ { data, size, addr_mode } => {
+				let size = match addr_mode {
+					AddrMode::AddressReg(_) => Size::Long,
+					_ => size,
+				};
 				let value = self.read_with_mode(addr_mode, size, false);
 				let new_value = match value {
 					Data::Byte(d) => Data::Byte(d.wrapping_add(data)),
 					Data::Word(d) => Data::Word(d.wrapping_add(data.into())),
 					Data::Long(d) => Data::Long(d.wrapping_add(data.into())),
 				};
-				self.set_x(value.is_negative() && !new_value.is_negative());
-				self.set_n(new_value.is_negative());
-				self.set_z(new_value.is_zero());
-				self.set_v(!value.is_negative() && new_value.is_negative());
-				self.set_c(value.is_negative() && !new_value.is_negative());
+				if let AddrMode::AddressReg(_) = addr_mode { }
+				else {
+					self.set_x(value.is_negative() && !new_value.is_negative());
+					self.set_n(new_value.is_negative());
+					self.set_z(new_value.is_zero());
+					self.set_v(!value.is_negative() && new_value.is_negative());
+					self.set_c(value.is_negative() && !new_value.is_negative());
+				};
 				self.write_with_mode(addr_mode, new_value, true);
-				println!("ADDQ #{data},{addr_mode}")
+				println!("ADDQ #{data},{addr_mode}");
+			},
+			Opcode::SubQ { data, size, addr_mode } => {
+				let size = match addr_mode {
+					AddrMode::AddressReg(_) => Size::Long,
+					_ => size,
+				};
+				let value = self.read_with_mode(addr_mode, size, false);
+				let new_value = match value {
+					Data::Byte(d) => Data::Byte(d.wrapping_sub(data)),
+					Data::Word(d) => Data::Word(d.wrapping_sub(data.into())),
+					Data::Long(d) => Data::Long(d.wrapping_sub(data.into())),
+				};
+				if let AddrMode::AddressReg(_) = addr_mode { }
+				else {
+					self.set_x(value.is_negative() && !new_value.is_negative());
+					self.set_n(new_value.is_negative());
+					self.set_z(new_value.is_zero());
+					self.set_v(!value.is_negative() && new_value.is_negative());
+					self.set_c(value.is_negative() && !new_value.is_negative());
+				};
+				self.write_with_mode(addr_mode, new_value, true);
+				println!("SUBQ #{data},{addr_mode}");
 			}
 			Opcode::DBcc { cond, loop_down } => {
 				let disp = CPU::sign_extend_u16(self.read_u16(self.program_counter));
@@ -680,6 +793,9 @@ impl CPU {
 				println!("LS{dir} {mode}{rot},{reg}");
 			},
 			_ => panic!("{opcode} unimplemented."),
+		}
+		if self.cycles == current_cycle {
+			panic!("{opcode} failed to advance cycles.");
 		}
 	}
 	
@@ -1353,6 +1469,8 @@ impl CPU {
 		self.d = [0; 8];
 		self.ram = vec![0; RAM_SIZE];
 		self.usp = 0;
-		self.ssp = CPU::load_u32_at(&self.cart_memory, 0)
+		self.ssp = CPU::load_u32_at(&self.cart_memory, 0);
+		self.cycles = 0;
+		self.countdown = 0;
 	}
 }

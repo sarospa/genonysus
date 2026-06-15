@@ -181,6 +181,7 @@ impl Vector {
 	}
 }
 
+#[derive(Clone, Copy)]
 pub enum RotateDirection {
 	Left,
 	Right,
@@ -202,6 +203,7 @@ impl fmt::Display for RotateDirection {
 	}
 }
 
+#[derive(Clone, Copy)]
 pub enum RotateMode {
 	Immediate,
 	Register,
@@ -223,6 +225,7 @@ impl fmt::Display for RotateMode {
 	}
 }
 
+#[derive(Clone, Copy)]
 pub enum MoveDirection {
 	RegToMem,
 	MemToReg,
@@ -251,6 +254,7 @@ impl BinOpDirection {
 	}
 }
 
+#[derive(Clone, Copy)]
 pub enum Condition {
 	True,
 	False,
@@ -586,4 +590,10 @@ pub struct Flags {
 	pub z: bool,
 	pub v: bool,
 	pub c: bool,
+}
+
+pub fn calc_opcode_cycles(opcode: Opcode, dest: Option<AddrMode>, source: Option<AddrMode>, size: Option<Size>, long_disp: Option<bool>, branch_taken: Option<bool>, counter_expired: Option<bool>, bin_dir: Option<BinOpDirection>, move_dir: Option<MoveDirection>) -> u64 {
+	match opcode {
+		_ => panic!("Cycle calculation for {opcode} unimplemented."),
+	}
 }

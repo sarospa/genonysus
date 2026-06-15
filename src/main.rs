@@ -3,7 +3,7 @@
 use std::env;
 use std::fs;
 
-mod cpu;
+mod genesis;
 
 fn main() {
 	let args: Vec<String> = env::args().collect();
@@ -19,9 +19,9 @@ fn main() {
 		}
 	};
 	
-	let mut cpu = cpu::CPU::new(&rom);
+	let mut console = genesis::Genesis::new(&rom);
 	
 	loop {
-		cpu.run_opcode();
+		console.advance_cycle();
 	}
 }
