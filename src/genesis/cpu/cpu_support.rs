@@ -1,11 +1,5 @@
 use std::fmt;
 
-pub const CART_SIZE: usize = 0x400000;
-pub const RAM_SIZE: usize = 0x10000;
-pub const RAM_START: usize = 0xFF0000;
-pub const RAM_END: usize = RAM_START + RAM_SIZE;
-pub const ADDRESS_SPACE: usize = 0xFFFFFF;
-
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Size {
 	Byte,
@@ -171,6 +165,7 @@ impl fmt::Display for Register {
 	}
 }
 
+#[derive(Clone, Copy)]
 pub struct Vector { i: u16 }
 impl Vector {
 	pub fn new(vector: u16) -> Vector {
@@ -241,6 +236,7 @@ impl MoveDirection {
 	}
 }
 
+#[derive(Clone, Copy)]
 pub enum BinOpDirection {
 	ToReg,
 	ToEA,
@@ -374,31 +370,7 @@ impl fmt::Display for AddrMode {
 	}
 }
 
-#[derive(Debug)]
-pub enum Controller {
-	Unplugged,
-	ThreeButton,
-	SixButton,
-}
-
-impl Controller {
-	pub fn read(&self) -> u8 {
-		match self {
-			Controller::Unplugged => 0,
-			Controller::ThreeButton => panic!("Three button controller not implemented."),
-			Controller::SixButton => panic!("Six button controller not implemented."),
-		}
-	}
-	
-	pub fn write(&mut self) -> () {
-		match self {
-			Controller::Unplugged => (),
-			Controller::ThreeButton => panic!("Three button controller not implemented."),
-			Controller::SixButton => panic!("Six button controller not implemented."),
-		}
-	}
-}
-
+#[derive(Clone, Copy)]
 pub enum Opcode {
 	OrIToCcr,
 	OrIToSr,
@@ -592,8 +564,269 @@ pub struct Flags {
 	pub c: bool,
 }
 
-pub fn calc_opcode_cycles(opcode: Opcode, dest: Option<AddrMode>, source: Option<AddrMode>, size: Option<Size>, long_disp: Option<bool>, branch_taken: Option<bool>, counter_expired: Option<bool>, bin_dir: Option<BinOpDirection>, move_dir: Option<MoveDirection>) -> u64 {
+pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_expired: Option<bool>, reg_count: Option<u64>, rot: Option<u64>) -> u64 {
 	match opcode {
+		Opcode::AndI { size, addr_mode } => {
+			match addr_mode {
+				AddrMode::DataReg(_) => {
+					match size {
+						Size::Long => 14,
+						_ => 8,
+					}
+				},
+				_ => {
+					match size {
+						Size::Long => 20,
+						_ => 12
+					}
+				}
+			}
+		},
+		Opcode::MoveA { size, source, .. } => {
+			match size {
+				Size::Long => {
+					match source {
+						AddrMode::DataReg(_) | AddrMode::AddressReg(_) => 4,
+						AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::Immediate => 12,
+						AddrMode::AddressWithPredec(_) => 14,
+						AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort | AddrMode::PCWithDisp => 16,
+						AddrMode::AddressWithIndex(_) | AddrMode::PCWithIndex => 18,
+						AddrMode::AbsoluteLong => 20,
+					}
+				},
+				_ => {
+					match source {
+						AddrMode::DataReg(_) | AddrMode::AddressReg(_) => 4,
+						AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::Immediate => 8,
+						AddrMode::AddressWithPredec(_) => 10,
+						AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort | AddrMode::PCWithDisp => 12,
+						AddrMode::AddressWithIndex(_) | AddrMode::PCWithIndex => 14,
+						AddrMode::AbsoluteLong => 16,
+					}
+				}
+			}
+		}
+		Opcode::Move { size, dest, source } => {
+			match size {
+				Size::Long => {
+					match source {
+						AddrMode::DataReg(_) | AddrMode::AddressReg(_) => {
+							match dest {
+								AddrMode::DataReg(_) => 4,
+								AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_) => 12,
+								AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 16,
+								AddrMode::AddressWithIndex(_) => 18,
+								AddrMode::AbsoluteLong => 20,
+								_ => panic!("Invalid addressing mode {dest} in opcode {opcode}"),
+							}
+						},
+						AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::Immediate => {
+							match dest {
+								AddrMode::DataReg(_) => 12,
+								AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_) => 20,
+								AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 24,
+								AddrMode::AddressWithIndex(_) => 26,
+								AddrMode::AbsoluteLong => 28,
+								_ => panic!("Invalid addressing mode {dest} in opcode {opcode}"),
+							}
+						},
+						AddrMode::AddressWithPredec(_) => {
+							match dest {
+								AddrMode::DataReg(_) => 14,
+								AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_) => 22,
+								AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 26,
+								AddrMode::AddressWithIndex(_) => 28,
+								AddrMode::AbsoluteLong => 30,
+								_ => panic!("Invalid addressing mode {dest} in opcode {opcode}"),
+							}
+						},
+						AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort | AddrMode::PCWithDisp => {
+							match dest {
+								AddrMode::DataReg(_) => 16,
+								AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_) => 24,
+								AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 28,
+								AddrMode::AddressWithIndex(_) => 30,
+								AddrMode::AbsoluteLong => 32,
+								_ => panic!("Invalid addressing mode {dest} in opcode {opcode}"),
+							}
+						},
+						AddrMode::AddressWithIndex(_) | AddrMode::PCWithIndex => {
+							match dest {
+								AddrMode::DataReg(_) => 18,
+								AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_) => 26,
+								AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 30,
+								AddrMode::AddressWithIndex(_) => 32,
+								AddrMode::AbsoluteLong => 34,
+								_ => panic!("Invalid addressing mode {dest} in opcode {opcode}"),
+							}
+						},
+						AddrMode::AbsoluteLong => {
+							match dest {
+								AddrMode::DataReg(_) => 20,
+								AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_) => 28,
+								AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 32,
+								AddrMode::AddressWithIndex(_) => 34,
+								AddrMode::AbsoluteLong => 36,
+								_ => panic!("Invalid addressing mode {dest} in opcode {opcode}"),
+							}
+						},
+					}
+				},
+				_ => {
+					match source {
+						AddrMode::DataReg(_) | AddrMode::AddressReg(_) => {
+							match dest {
+								AddrMode::DataReg(_) => 4,
+								AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_) => 8,
+								AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 12,
+								AddrMode::AddressWithIndex(_) => 14,
+								AddrMode::AbsoluteLong => 16,
+								_ => panic!("Invalid addressing mode {dest} in opcode {opcode}"),
+							}
+						},
+						AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::Immediate => {
+							match dest {
+								AddrMode::DataReg(_) => 8,
+								AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_) => 12,
+								AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 16,
+								AddrMode::AddressWithIndex(_) => 18,
+								AddrMode::AbsoluteLong => 20,
+								_ => panic!("Invalid addressing mode {dest} in opcode {opcode}"),
+							}
+						},
+						AddrMode::AddressWithPredec(_) => {
+							match dest {
+								AddrMode::DataReg(_) => 10,
+								AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_) => 14,
+								AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 18,
+								AddrMode::AddressWithIndex(_) => 20,
+								AddrMode::AbsoluteLong => 22,
+								_ => panic!("Invalid addressing mode {dest} in opcode {opcode}"),
+							}
+						},
+						AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort | AddrMode::PCWithDisp => {
+							match dest {
+								AddrMode::DataReg(_) => 12,
+								AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_) => 16,
+								AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 20,
+								AddrMode::AddressWithIndex(_) => 22,
+								AddrMode::AbsoluteLong => 24,
+								_ => panic!("Invalid addressing mode {dest} in opcode {opcode}"),
+							}
+						},
+						AddrMode::AddressWithIndex(_) | AddrMode::PCWithIndex => {
+							match dest {
+								AddrMode::DataReg(_) => 14,
+								AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_) => 18,
+								AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 22,
+								AddrMode::AddressWithIndex(_) => 24,
+								AddrMode::AbsoluteLong => 26,
+								_ => panic!("Invalid addressing mode {dest} in opcode {opcode}"),
+							}
+						},
+						AddrMode::AbsoluteLong => {
+							match dest {
+								AddrMode::DataReg(_) => 16,
+								AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_) => 20,
+								AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 24,
+								AddrMode::AddressWithIndex(_) => 26,
+								AddrMode::AbsoluteLong => 28,
+								_ => panic!("Invalid addressing mode {dest} in opcode {opcode}"),
+							}
+						},
+					}
+				}
+			}
+		},
+		Opcode::MoveToSr { .. } => 12,
+		Opcode::Tst { .. } => 4,
+		Opcode::MoveUsp { .. } => 4,
+		Opcode::Jmp { addr_mode } => {
+			match addr_mode {
+				AddrMode::Address(_) => 8,
+				AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort | AddrMode::PCWithDisp => 10,
+				AddrMode::AddressWithIndex(_) | AddrMode::PCWithIndex => 14,
+				AddrMode::AbsoluteLong => 12,
+				_ => panic!("Invalid addressing mode {addr_mode} in opcode {opcode}"),
+			}
+		}
+		Opcode::MoveM { dir, addr_mode, size } => {
+			let reg_cycles = match size {
+				Size::Long => 8 * reg_count.unwrap(),
+				_ => 4 * reg_count.unwrap(),
+			};
+			match dir {
+				MoveDirection::MemToReg => {
+					match addr_mode {
+						AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) => 12 + reg_cycles,
+						AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort | AddrMode::PCWithDisp => 16 + reg_cycles,
+						AddrMode::AddressWithIndex(_) | AddrMode::PCWithIndex => 18 + reg_cycles,
+						AddrMode::AbsoluteLong => 20 + reg_cycles,
+						_ => panic!("Invalid address mode {addr_mode} on {opcode}.")
+					}
+				},
+				MoveDirection::RegToMem => {
+					match addr_mode {
+						AddrMode::Address(_) | AddrMode::AddressWithPredec(_) => 8 + reg_cycles,
+						AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 12 + reg_cycles,
+						AddrMode::AddressWithIndex(_) => 14 + reg_cycles,
+						AddrMode::AbsoluteLong => 16 + reg_cycles,
+						_ => panic!("Invalid address mode {addr_mode} on {opcode}.")
+					}
+				}
+			}
+		},
+		Opcode::Lea { addr_mode, .. } => {
+			match addr_mode {
+				AddrMode::Address(_) => 4,
+				AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort | AddrMode::PCWithDisp => 8,
+				AddrMode::AddressWithIndex(_) | AddrMode::AbsoluteLong | AddrMode::PCWithIndex => 12,
+				_ => panic!("Invalid address mode {addr_mode} on {opcode}.")
+			}
+		},
+		Opcode::SubQ { size, addr_mode, .. } => {
+			match size {
+				Size::Long => {
+					match addr_mode {
+						AddrMode::DataReg(_) => 8,
+						AddrMode::AddressReg(_) => 8,
+						_ => 12,
+					}
+				},
+				_ => {
+					match addr_mode {
+						AddrMode::DataReg(_) => 4,
+						AddrMode::AddressReg(_) => 8,
+						_ => 8,
+					}
+				}
+			}
+		}
+		Opcode::DBcc { .. } => {
+			let branch_taken = branch_taken.unwrap();
+			let counter_expired = counter_expired.unwrap();
+			if branch_taken { 10 }
+			else {
+				if counter_expired { 14 }
+				else { 12 }
+			}
+		}
+		Opcode::Bcc { disp, .. } => {
+			let branch_taken = branch_taken.unwrap();
+			if branch_taken { 10 }
+			else {
+				if disp == 0 { 12 }
+				else { 8 }
+			}
+		},
+		Opcode::MoveQ { .. } => 4,
+		Opcode::LsdToD { size, .. } => {
+			let rotation = rot.unwrap();
+			match size {
+				Size::Long => 8 + (rotation * 2),
+				_ => 6 + (rotation * 2),
+			}
+		}
 		_ => panic!("Cycle calculation for {opcode} unimplemented."),
 	}
 }

@@ -5,108 +5,50 @@ use bitmatch::bitmatch;
 
 mod cpu_support;
 use cpu_support::*;
+use crate::genesis::Motorola68KBus;
 
 #[cfg(test)]
 mod tests;
 
 #[derive(Debug)]
 pub struct CPU {
-	cart_memory: Vec<u8>,
-	ram: Vec<u8>,
 	program_counter: u32,
 	status_register: u16,
 	d: [u32; 8],
 	a: [u32; 7],
 	usp: u32,
 	ssp: u32,
-	controller1: Controller,
-	controller1_control: u8,
-	controller2: Controller,
-	controller2_control: u8,
 	cycles: u64,
 	countdown: u64,
 }
 
 impl CPU {
-	pub fn new(rom: &Vec<u8>) -> CPU {
-		let mut cart_memory = vec![0; CART_SIZE];
-		for i in 0..Ord::min(CART_SIZE, rom.len()) {
-			cart_memory[i] = rom[i];
-		}
-		
+	pub fn new(bus: &dyn Motorola68KBus) -> CPU {	
 		CPU {
-			cart_memory: cart_memory,
-			ram: vec![0; RAM_SIZE],
-			program_counter: CPU::load_u32_at(&rom, 4),
+			program_counter: bus.read_u32(4),
 			status_register: 0,
 			d: [0; 8],
 			a: [0, 0, 0, 0, 0, 0, 0],
 			usp: 0,
-			ssp: CPU::load_u32_at(&rom, 0),
-			controller1: Controller::Unplugged,
-			controller1_control: 0,
-			controller2: Controller::Unplugged,
-			controller2_control: 0,
+			ssp: bus.read_u32(0),
 			cycles: 0,
 			countdown: 0,
 		}
 	}
 	
-	pub fn advance_cycle(&mut self) {
+	pub fn advance_cycle(&mut self, bus: &mut dyn Motorola68KBus) {
 		if self.countdown == 0 {
-			self.run_opcode();
+			self.run_opcode(bus);
 		}
-		else {
-			self.countdown -= 1;
-		}
+		self.countdown -= 1;
 		self.cycles += 1;
 	}
 	
-	pub fn add_cycles(&mut self, cycles: u64) {
-		self.cycles += cycles;
-		self.countdown += cycles;
-	}
-	
-	fn read_u8(&self, address: u32) -> u8 {
-		let address_index = (address as usize) & ADDRESS_SPACE;
-		match address_index {
-			0..CART_SIZE => self.cart_memory[address_index],
-			RAM_START..RAM_END => self.ram[address_index - RAM_START],
-			0xA10002..=0xA10003 => self.controller1.read(),
-			0xA10004..=0xA10005 => self.controller2.read(),
-			0xA10008..=0xA10009 => self.controller1_control,
-			0xA1000A..=0xA1000B => self.controller2_control,
-			0xA1000C..=0xA1000D => 0, // Expansion port control
-			_ => {
-				println!("Address {:#08X} located in unimplemented memory region.", address);
-				panic!("accessed unimplemented CPU memory");
-			}
-		}
-	}
-	
-	fn read_u16(&self, address: u32) -> u16 {
-		if address % 2 == 1 {
-			panic!("Illegal access across word boundary at {:#08X}.", address);
-		}
-		((self.read_u8(address) as u16) << 8)
-			+ (self.read_u8(address + 1) as u16)
-	}
-	
-	fn read_u32(&self, address: u32) -> u32 {
-		if address % 2 == 1 {
-			panic!("Illegal access across word boundary at {:#08X}.", address);
-		}
-		((self.read_u8(address) as u32) << 24)
-			+ ((self.read_u8(address + 1) as u32) << 16)
-			+ ((self.read_u8(address + 2) as u32) << 8)
-			+ (self.read_u8(address + 3) as u32)
-	}
-	
-	fn read(&self, address: u32, size: Size) -> Data {
+	fn read(bus: &dyn Motorola68KBus, address: u32, size: Size) -> Data {
 		match size {
-			Size::Byte => Data::Byte(self.read_u8(address)),
-			Size::Word => Data::Word(self.read_u16(address)),
-			Size::Long => Data::Long(self.read_u32(address)),
+			Size::Byte => Data::Byte(bus.read_u8(address)),
+			Size::Word => Data::Word(bus.read_u16(address)),
+			Size::Long => Data::Long(bus.read_u32(address)),
 		}
 	}
 	
@@ -153,45 +95,11 @@ impl CPU {
 		}
 	}
 	
-	fn write_u8(&mut self, address: u32, data: u8) {
-		let address_index = (address as usize) & ADDRESS_SPACE;
-		match address_index {
-			0..CART_SIZE => (), // Don't overwrite the cart ROM!
-			RAM_START..RAM_END => self.ram[address_index - RAM_START] = data,
-			0xA10002..=0xA10003 => self.controller1.write(),
-			0xA10004..=0xA10005 => self.controller2.write(),
-			0xA10008..=0xA10009 => self.controller1_control = data,
-			0xA1000A..=0xA1000B => self.controller2_control = data,
-			0xA1000C..=0xA1000D => (), // Expansion port control
-			_ => {
-				panic!("Address {:#08X} located in unimplemented memory region.", address);
-			}
-		}
-	}
-	
-	fn write_u16(&mut self, address: u32, data: u16) {
-		if address % 2 == 1 {
-			panic!("Illegal access across word boundary at {:#08X}.", address);
-		}
-		self.write_u8(address, ((data & 0xFF00) >> 8) as u8);
-		self.write_u8(address, (data & 0x00FF) as u8);
-	}
-	
-	fn write_u32(&mut self, address:u32, data: u32) {
-		if address % 2 == 1 {
-			panic!("Illegal access across word boundary at {:#08X}.", address);
-		}
-		self.write_u8(address, ((data & 0xFF000000) >> 24) as u8);
-		self.write_u8(address, ((data & 0x00FF0000) >> 16) as u8);
-		self.write_u8(address, ((data & 0x0000FF00) >> 8) as u8);
-		self.write_u8(address, (data & 0x000000FF) as u8);
-	}
-	
-	fn write(&mut self, address: u32, data: Data) {
+	fn write(bus: &mut dyn Motorola68KBus, address: u32, data: Data) {
 		match data {
-			Data::Byte(d) => self.write_u8(address, d),
-			Data::Word(d) => self.write_u16(address, d),
-			Data::Long(d) => self.write_u32(address, d),
+			Data::Byte(d) => bus.write_u8(address, d),
+			Data::Word(d) => bus.write_u16(address, d),
+			Data::Long(d) => bus.write_u32(address, d),
 		}
 	}
 	
@@ -251,14 +159,14 @@ impl CPU {
 	}
 	
 	// Assumes the program counter has advanced to the extension word, and advances it past it if applicable.
-	fn read_with_mode(&mut self, addr_mode: AddrMode, size: Size, advance: bool) -> Data {
+	fn read_with_mode(&mut self, bus: &dyn Motorola68KBus, addr_mode: AddrMode, size: Size, advance: bool) -> Data {
 		match addr_mode {
 			AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_)
 			| AddrMode::AddressWithDisp(_) | AddrMode::AddressWithIndex(_)
 			| AddrMode::PCWithDisp | AddrMode::PCWithIndex | AddrMode::AbsoluteShort
 			| AddrMode::AbsoluteLong => {
-				let address = self.calc_addr(addr_mode, size, advance);
-				self.read(address, size)
+				let address = self.calc_addr(bus, addr_mode, size, advance);
+				CPU::read(bus, address, size)
 			},
 			AddrMode::DataReg(reg) => {
 				self.read_register(Register::new(reg as usize, false), size)
@@ -268,51 +176,50 @@ impl CPU {
 			}
 			AddrMode::Immediate => {
 				let data = match size {
-					Size::Byte => self.read(self.program_counter + 1, Size::Byte), // data is stored in the low byte of extension word
-					Size::Word => self.read(self.program_counter, Size::Word),
-					Size::Long => self.read(self.program_counter, Size::Long),
+					Size::Byte => CPU::read(bus, self.program_counter + 1, Size::Byte), // data is stored in the low byte of extension word
+					Size::Word => CPU::read(bus, self.program_counter, Size::Word),
+					Size::Long => CPU::read(bus, self.program_counter, Size::Long),
 				};
 				if advance {
 					self.program_counter += Ord::max(size.length(), 2);
 				};
 				data
 			},
-			_ => panic!("Unimplemented read addressing mode {:?}.", addr_mode),
 		}
 	}
 	
-	fn read_with_mode_u8(&mut self, addr_mode: AddrMode, advance: bool) -> u8 {
-		let Data::Byte(data) = self.read_with_mode(addr_mode, Size::Byte, advance)
+	fn read_with_mode_u8(&mut self, bus: &dyn Motorola68KBus, addr_mode: AddrMode, advance: bool) -> u8 {
+		let Data::Byte(data) = self.read_with_mode(bus, addr_mode, Size::Byte, advance)
 		else {
 			panic!("read_with_mode_u8 returned a non-byte value.");
 		};
 		return data;
 	}
 	
-	fn read_with_mode_u16(&mut self, addr_mode: AddrMode, advance: bool) -> u16 {
-		let Data::Word(data) = self.read_with_mode(addr_mode, Size::Word, advance)
+	fn read_with_mode_u16(&mut self, bus: &dyn Motorola68KBus, addr_mode: AddrMode, advance: bool) -> u16 {
+		let Data::Word(data) = self.read_with_mode(bus, addr_mode, Size::Word, advance)
 		else {
 			panic!("read_with_mode_u16 returned a non-word value.");
 		};
 		return data;
 	}
 	
-	fn read_with_mode_u32(&mut self, addr_mode: AddrMode, advance: bool) -> u32 {
-		let Data::Long(data) = self.read_with_mode(addr_mode, Size::Long, advance)
+	fn read_with_mode_u32(&mut self, bus: &dyn Motorola68KBus, addr_mode: AddrMode, advance: bool) -> u32 {
+		let Data::Long(data) = self.read_with_mode(bus, addr_mode, Size::Long, advance)
 		else {
 			panic!("read_with_mode_u32 returned a non-long value.");
 		};
 		return data;
 	}
 	
-	fn write_with_mode(&mut self, addr_mode: AddrMode, data: Data, advance: bool) {
+	fn write_with_mode(&mut self, bus: &mut dyn Motorola68KBus, addr_mode: AddrMode, data: Data, advance: bool) {
 		match addr_mode {
 			AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_)
 			| AddrMode::AddressWithDisp(_) | AddrMode::AddressWithIndex(_)
 			| AddrMode::PCWithDisp | AddrMode::PCWithIndex | AddrMode::AbsoluteShort
 			| AddrMode::AbsoluteLong => {
-				let address = self.calc_addr(addr_mode, Size::from_data(data), advance);
-				self.write(address, data);
+				let address = self.calc_addr(bus, addr_mode, Size::from_data(data), advance);
+				CPU::write(bus, address, data);
 			},
 			AddrMode::DataReg(reg) => {
 				self.write_register(data, Register::new(reg as usize, false))
@@ -324,7 +231,7 @@ impl CPU {
 		}
 	}
 	
-	fn calc_addr(&mut self, addr_mode: AddrMode, size: Size, advance: bool) -> u32 {
+	fn calc_addr(&mut self, bus: &dyn Motorola68KBus, addr_mode: AddrMode, size: Size, advance: bool) -> u32 {
 		match addr_mode {
 			AddrMode::Address(reg) => {
 				self.read_register_u32(Register::new(reg, true))
@@ -358,7 +265,7 @@ impl CPU {
 				address - size.length()
 			},
 			AddrMode::AddressWithDisp(reg) => {
-				let disp: i32 = CPU::sign_extend_u16(self.read_u16(self.program_counter));
+				let disp: i32 = CPU::sign_extend_u16(bus.read_u16(self.program_counter));
 				let address = self.read_register_u32(Register::new(reg, true));
 				if advance {
 					self.program_counter += 2;
@@ -366,7 +273,7 @@ impl CPU {
 				address.wrapping_add_signed(disp)
 			},
 			AddrMode::PCWithDisp => {
-				let disp: i32 = CPU::sign_extend_u16(self.read_u16(self.program_counter));
+				let disp: i32 = CPU::sign_extend_u16(bus.read_u16(self.program_counter));
 				let address = self.program_counter.wrapping_add_signed(disp);
 				if advance {
 					self.program_counter += 2;
@@ -374,14 +281,14 @@ impl CPU {
 				address
 			},
 			AddrMode::AbsoluteShort => {
-				let address = 0u32.wrapping_add_signed(CPU::sign_extend_u16(self.read_u16(self.program_counter)));
+				let address = 0u32.wrapping_add_signed(CPU::sign_extend_u16(bus.read_u16(self.program_counter)));
 				if advance {
 					self.program_counter += 2;
 				};
 				address
 			},
 			AddrMode::AbsoluteLong => {
-				let address = self.read_u32(self.program_counter);
+				let address = bus.read_u32(self.program_counter);
 				if advance {
 					self.program_counter += 4;
 				};
@@ -472,56 +379,79 @@ impl CPU {
 	}
 	
 	#[bitmatch]
-	pub fn run_opcode(&mut self) -> () {
-		print!("{:#010X} ", self.program_counter);
-		let current_cycle = self.cycles;
-		let opcode = self.decode_opcode();
+	pub fn run_opcode(&mut self, bus: &mut dyn Motorola68KBus) -> () {
+		print!("{:#010X} {:#010} ", self.program_counter, self.cycles);
+		let opcode = self.decode_opcode(bus);
 		self.program_counter += 2;
 		match opcode {
 			Opcode::AndI { size, addr_mode } => {
-				let imm = self.read_with_mode(AddrMode::Immediate, size, true);
-				let data = self.read_with_mode(addr_mode, size, false);
+				let imm = self.read_with_mode(bus, AddrMode::Immediate, size, true);
+				let data = self.read_with_mode(bus, addr_mode, size, false);
 				let data = match (imm, data) {
 					(Data::Byte(a), Data::Byte(b)) => Data::Byte(a & b),
 					(Data::Word(a), Data::Word(b)) => Data::Word(a & b),
 					(Data::Long(a), Data::Long(b)) => Data::Long(a & b),
 					_ => panic!("Non-matching data in ANDI"),
 				};
-				self.write_with_mode(addr_mode, data, true);
-				let instr_cycles = match addr_mode {
-					AddrMode::DataReg(_) => {
-						match size {
-							Size::Long => 14,
-							_ => 8,
-						}
+				match data {
+					Data::Byte(d) => {
+						self.set_n((d & 0x80) == 0x80);
+						self.set_z(d == 0);
 					},
-					_ => {
-						match size {
-							Size::Long => 20,
-							_ => 12
-						}
-					}
+					Data::Word(d) => {
+						self.set_n((d & 0x8000) == 0x8000);
+						self.set_z(d == 0);
+					},
+					Data::Long(d) => {
+						self.set_n((d & 0x80000000) == 0x80000000);
+						self.set_z(d == 0);
+					},
 				};
+				self.write_with_mode(bus, addr_mode, data, true);
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
 				let addr_cycles = self.calc_addr_cycles(addr_mode, size);
-				self.add_cycles(addr_cycles + instr_cycles);
+				self.countdown += addr_cycles + instr_cycles;
 				println!("ANDI {},{} = {}", imm, addr_mode, data);
 			}
 			Opcode::MoveA { size, dest, source } => {
-				let data = self.read_with_mode(source, size, true);
+				let data = self.read_with_mode(bus, source, size, true);
 				self.write_register(data.sign_extend(), Register::from_areg(dest));
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				self.countdown += instr_cycles;
 				println!("MOVEA {},A{} = {}", source, dest.get(), data);
 			}
 			Opcode::Move { size, dest, source } => {
-				let data = self.read_with_mode(source, size, true);
-				self.write_with_mode(dest, data, true);
+				let data = self.read_with_mode(bus, source, size, true);
+				self.set_v(false);
+				self.set_c(false);
+				match data {
+					Data::Byte(d) => {
+						self.set_n((d & 0x80) == 0x80);
+						self.set_z(d == 0);
+					},
+					Data::Word(d) => {
+						self.set_n((d & 0x8000) == 0x8000);
+						self.set_z(d == 0);
+					},
+					Data::Long(d) => {
+						self.set_n((d & 0x80000000) == 0x80000000);
+						self.set_z(d == 0);
+					},
+				};
+				self.write_with_mode(bus, dest, data, true);
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				self.countdown += instr_cycles;
 				println!("MOVE {},{} = {}", source, dest, data);
 			},
 			Opcode::MoveToSr { addr_mode } => {
-				self.status_register = self.read_with_mode_u16(addr_mode, true);
+				self.status_register = self.read_with_mode_u16(bus, addr_mode, true);
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				let addr_cycles = self.calc_addr_cycles(addr_mode, Size::Word);
+				self.countdown += addr_cycles + instr_cycles;
 				println!("MOVE {},SR = {:#06X}", addr_mode, self.status_register);
 			},
 			Opcode::Tst { size, addr_mode } => {
-				let data = self.read_with_mode(addr_mode, size, true);
+				let data = self.read_with_mode(bus, addr_mode, size, true);
 				self.set_v(false);
 				self.set_c(false);
 				match data {
@@ -538,6 +468,9 @@ impl CPU {
 						self.set_z((val as i32) == 0);
 					}
 				}
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				let addr_cycles = self.calc_addr_cycles(addr_mode, Size::Word);
+				self.countdown += addr_cycles + instr_cycles;
 				println!("TST {} = CCR {:#04X}", addr_mode, self.status_register);
 			},
 			Opcode::MoveUsp { dir, a } => {
@@ -552,13 +485,17 @@ impl CPU {
 						println!("MOVE USP,{}", a);
 					}
 				};
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				self.countdown += instr_cycles;
 			},
 			Opcode::Jmp { addr_mode } => {
-				self.program_counter = self.calc_addr(addr_mode, Size::Long, true);
+				self.program_counter = self.calc_addr(bus, addr_mode, Size::Long, true);
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				self.countdown += instr_cycles;
 				println!("JMP {}", addr_mode);
 			}
 			Opcode::MoveM { dir, size, addr_mode } => {
-				let reg_bits = self.read_u16(self.program_counter);
+				let reg_bits = bus.read_u16(self.program_counter);
 				self.program_counter += 2;
 				let reg_list = match addr_mode {
 					AddrMode::AddressWithPredec(_) => {
@@ -604,7 +541,8 @@ impl CPU {
 						, i == 1, j == 1, k == 1, l == 1, m == 1, n == 1, o == 1, p == 1]
 					}
 				};
-				let mut address = self.calc_addr(addr_mode, size, true);
+				let mut address = self.calc_addr(bus, addr_mode, size, true);
+				let mut reg_count = 0;
 				match dir {
 					MoveDirection::RegToMem => {
 						for i in 15..=0 {
@@ -612,11 +550,12 @@ impl CPU {
 								if let AddrMode::AddressWithPredec(_) = addr_mode {
 									address -= size.length();
 								};
-								self.write(address, self.read_register(reg_list[i], size));
+								CPU::write(bus, address, self.read_register(reg_list[i], size));
 								if let AddrMode::AddressWithPredec(_) = addr_mode { }
 								else {
 									address += size.length();
 								};
+								reg_count += 1;
 							}
 						};
 						if let AddrMode::AddressWithPredec(reg) = addr_mode {
@@ -627,9 +566,9 @@ impl CPU {
 					MoveDirection::MemToReg => {
 						for i in 15..=0 {
 							if reg_flags[i] {
-								let data = self.read(address, size);
-								self.write_register(self.read(address, size), reg_list[i]);
+								self.write_register(CPU::read(bus, address, size), reg_list[i]);
 								address += size.length();
+								reg_count += 1;
 							}
 						};
 						if let AddrMode::AddressWithPostinc(reg) = addr_mode {
@@ -638,10 +577,14 @@ impl CPU {
 						println!("MOVEM {},{:#06X}", addr_mode, reg_bits);
 					}
 				};
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, Some(reg_count), None);
+				self.countdown += instr_cycles;
 			},
 			Opcode::Lea { dest, addr_mode } => {
-				let address = self.calc_addr(addr_mode, Size::Long, true);
+				let address = self.calc_addr(bus, addr_mode, Size::Long, true);
 				self.write_register(Data::Long(address), Register::new(dest.get(), true));
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				self.countdown += instr_cycles;
 				println!("LEA {},A{} = {:#010X}", addr_mode, dest.get(), address);
 			},
 			Opcode::AddQ { data, size, addr_mode } => {
@@ -649,7 +592,7 @@ impl CPU {
 					AddrMode::AddressReg(_) => Size::Long,
 					_ => size,
 				};
-				let value = self.read_with_mode(addr_mode, size, false);
+				let value = self.read_with_mode(bus, addr_mode, size, false);
 				let new_value = match value {
 					Data::Byte(d) => Data::Byte(d.wrapping_add(data)),
 					Data::Word(d) => Data::Word(d.wrapping_add(data.into())),
@@ -663,7 +606,7 @@ impl CPU {
 					self.set_v(!value.is_negative() && new_value.is_negative());
 					self.set_c(value.is_negative() && !new_value.is_negative());
 				};
-				self.write_with_mode(addr_mode, new_value, true);
+				self.write_with_mode(bus, addr_mode, new_value, true);
 				println!("ADDQ #{data},{addr_mode}");
 			},
 			Opcode::SubQ { data, size, addr_mode } => {
@@ -671,7 +614,7 @@ impl CPU {
 					AddrMode::AddressReg(_) => Size::Long,
 					_ => size,
 				};
-				let value = self.read_with_mode(addr_mode, size, false);
+				let value = self.read_with_mode(bus, addr_mode, size, false);
 				let new_value = match value {
 					Data::Byte(d) => Data::Byte(d.wrapping_sub(data)),
 					Data::Word(d) => Data::Word(d.wrapping_sub(data.into())),
@@ -685,17 +628,22 @@ impl CPU {
 					self.set_v(!value.is_negative() && new_value.is_negative());
 					self.set_c(value.is_negative() && !new_value.is_negative());
 				};
-				self.write_with_mode(addr_mode, new_value, true);
+				self.write_with_mode(bus, addr_mode, new_value, true);
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				let addr_cycles = self.calc_addr_cycles(addr_mode, size);
+				self.countdown += addr_cycles + instr_cycles;
 				println!("SUBQ #{data},{addr_mode}");
 			}
 			Opcode::DBcc { cond, loop_down } => {
-				let disp = CPU::sign_extend_u16(self.read_u16(self.program_counter));
+				let mut branch_taken = false;
+				let disp = CPU::sign_extend_u16(bus.read_u16(self.program_counter));
 				let mut loop_count = self.read_register_u16(Register::from_dreg(loop_down));
 				if !cond.check(self.get_ccr_flags()) {
 					loop_count = loop_count.wrapping_add_signed(-1);
 					self.write_register(Data::Word(loop_count), Register::from_dreg(loop_down));
 					if loop_count & 0x8000 == 0 { // If loop count is positive
 						self.program_counter = self.program_counter.wrapping_add_signed(disp);
+						branch_taken = true;
 					}
 					else {
 						self.program_counter += 2;
@@ -704,11 +652,14 @@ impl CPU {
 				else {
 					self.program_counter += 2;
 				}
+				let instr_cycles = calc_opcode_cycles(opcode, Some(branch_taken), Some(loop_count == 0xFFFF), None, None);
+				self.countdown += instr_cycles;
 				println!("DB{cond},{loop_down} = PC {:#010X}, {loop_down} = {loop_count:#06X}", self.program_counter);
 			}
 			Opcode::Bcc { cond, disp } => {
+				let mut branch_taken = false;
 				let displacement = if disp == 0 {
-					let long_disp = CPU::sign_extend_u16(self.read_u16(self.program_counter));
+					let long_disp = CPU::sign_extend_u16(bus.read_u16(self.program_counter));
 					long_disp
 				}
 				else {
@@ -716,14 +667,23 @@ impl CPU {
 				};
 				if cond.check(self.get_ccr_flags()) {
 					self.program_counter = self.program_counter.wrapping_add_signed(displacement);
+					branch_taken = true;
 				}
 				else if disp == 0 {
 					self.program_counter += 2;
 				}
+				let instr_cycles = calc_opcode_cycles(opcode, Some(branch_taken), None, None, None);
+				self.countdown += instr_cycles;
 				println!("B{cond} = PC {:#010X}", self.program_counter);
 			},
 			Opcode::MoveQ { dest, data } => {
+				self.set_n((data & 0x80) == 0x80);
+				self.set_z(data == 0);
+				self.set_v(false);
+				self.set_c(false);
 				self.write_register(Data::Long(CPU::sign_extend_u8(data) as u32), Register::from_dreg(dest));
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				self.countdown += instr_cycles;
 				let d = dest.get();
 				println!("MOVEQ = D{} {:#010X}", d, self.d[d]);
 			},
@@ -790,18 +750,20 @@ impl CPU {
 				};
 				self.set_v(false);
 				self.write_register(new_data, register);
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, Some(rotation as u64));
+				self.countdown += instr_cycles;
 				println!("LS{dir} {mode}{rot},{reg}");
 			},
 			_ => panic!("{opcode} unimplemented."),
 		}
-		if self.cycles == current_cycle {
+		if self.countdown == 0 {
 			panic!("{opcode} failed to advance cycles.");
 		}
 	}
 	
 	#[bitmatch]
-	fn decode_opcode(&self) -> Opcode {
-		let opcode = self.read_u16(self.program_counter);
+	fn decode_opcode(&self, bus: &dyn Motorola68KBus) -> Opcode {
+		let opcode = bus.read_u16(self.program_counter);
 		print!("{:#06X} ", opcode);
 		#[bitmatch]
 		match opcode {
@@ -1140,7 +1102,7 @@ impl CPU {
 			// ADDQ
 			"0101_ddd0_ssmm_mxxx" => {
 				Opcode::AddQ {
-					data: d as u8,
+					data: if d == 0 { 8 } else { d } as u8,
 					size: Size::from_low_bits(s),
 					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8)
 				}
@@ -1148,7 +1110,7 @@ impl CPU {
 			// SUBQ
 			"0101_ddd1_ssmm_mxxx" => {
 				Opcode::SubQ {
-					data: d as u8,
+					data: if d == 0 { 8 } else { d } as u8,
 					size: Size::from_low_bits(s),
 					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8)
 				}
@@ -1451,25 +1413,15 @@ impl CPU {
 		(x as i8) as i32
 	}
 	
-	// Helper function for manually writing 68K test code.
-	#[cfg(test)]
-	pub fn write_rom(&mut self, data: u16) {
-		self.cart_memory[self.program_counter as usize] = (data >> 8) as u8;
-		self.program_counter += 1;
-		self.cart_memory[self.program_counter as usize] = (data & 0xFF) as u8;
-		self.program_counter += 1;
-	}
-	
 	// Put the cpu in a clean state to start a test.
 	#[cfg(test)]
-	pub fn test_reset(&mut self) {
-		self.program_counter = CPU::load_u32_at(&self.cart_memory, 4);
+	pub fn test_reset(&mut self, bus: &dyn Motorola68KBus) {
+		self.program_counter = bus.read_u32(4);
 		self.status_register = 0x2000;
 		self.a = [0; 7];
 		self.d = [0; 8];
-		self.ram = vec![0; RAM_SIZE];
 		self.usp = 0;
-		self.ssp = CPU::load_u32_at(&self.cart_memory, 0);
+		self.ssp = bus.read_u32(0);
 		self.cycles = 0;
 		self.countdown = 0;
 	}
