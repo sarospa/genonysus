@@ -25,3 +25,6 @@ target
 *.gen
 *.htm
 *_files*
+
+# Log files
+*.txt

@@ -139,6 +139,14 @@ impl CPU {
 		};
 	}
 	
+	fn push(&mut self, bus: &mut dyn Motorola68KBus, data: Data) {
+		self.write_with_mode(bus, AddrMode::AddressWithPredec(7), data, true);
+	}
+	
+	fn pop(&mut self, bus: &mut dyn Motorola68KBus, size: Size) {
+		self.read_with_mode(bus, AddrMode::AddressWithPostinc(7), size, true);
+	}
+	
 	fn decode_addressing_mode(&self, addressing_bits: u8) -> AddrMode {
 		let reg_bits = (addressing_bits & 0b111) as usize;
 		match addressing_bits {
@@ -242,10 +250,10 @@ impl CPU {
 				if advance {
 					// Stack pointer always increments by a minimum of 2 bytes
 					if reg == 7 && size == Size::Byte {
-						self.write_register(Data::Long(address + 2), register)
+						self.write_register(Data::Long(address.wrapping_add(2)), register)
 					}
 					else {
-						self.write_register(Data::Long(address + size.length()), register);
+						self.write_register(Data::Long(address.wrapping_add(size.length())), register);
 					}
 				}
 				address
@@ -256,13 +264,13 @@ impl CPU {
 				if advance {
 					// Stack pointer always decrements by a minimum of 2 bytes
 					if reg == 7 && size == Size::Byte {
-						self.write_register(Data::Long(address - 2), register)
+						self.write_register(Data::Long(address.wrapping_sub(2)), register)
 					}
 					else {
-						self.write_register(Data::Long(address - size.length()), register);
+						self.write_register(Data::Long(address.wrapping_sub(size.length())), register);
 					};
 				};
-				address - size.length()
+				address.wrapping_sub(size.length())
 			},
 			AddrMode::AddressWithDisp(reg) => {
 				let disp: i32 = CPU::sign_extend_u16(bus.read_u16(self.program_counter));
@@ -412,6 +420,35 @@ impl CPU {
 				let addr_cycles = self.calc_addr_cycles(addr_mode, size);
 				self.countdown += addr_cycles + instr_cycles;
 				println!("ANDI {},{} = {}", imm, addr_mode, data);
+			},
+			Opcode::EorI { size, addr_mode } => {
+				let imm = self.read_with_mode(bus, AddrMode::Immediate, size, true);
+				let data = self.read_with_mode(bus, addr_mode, size, false);
+				let data = match (imm, data) {
+					(Data::Byte(a), Data::Byte(b)) => Data::Byte(a ^ b),
+					(Data::Word(a), Data::Word(b)) => Data::Word(a ^ b),
+					(Data::Long(a), Data::Long(b)) => Data::Long(a ^ b),
+					_ => panic!("Non-matching data in EORI"),
+				};
+				match data {
+					Data::Byte(d) => {
+						self.set_n((d & 0x80) == 0x80);
+						self.set_z(d == 0);
+					},
+					Data::Word(d) => {
+						self.set_n((d & 0x8000) == 0x8000);
+						self.set_z(d == 0);
+					},
+					Data::Long(d) => {
+						self.set_n((d & 0x80000000) == 0x80000000);
+						self.set_z(d == 0);
+					},
+				};
+				self.write_with_mode(bus, addr_mode, data, true);
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				let addr_cycles = self.calc_addr_cycles(addr_mode, size);
+				self.countdown += addr_cycles + instr_cycles;
+				println!("EORI {},{} = {}", imm, addr_mode, data);
 			}
 			Opcode::MoveA { size, dest, source } => {
 				let data = self.read_with_mode(bus, source, size, true);
@@ -419,7 +456,7 @@ impl CPU {
 				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
 				self.countdown += instr_cycles;
 				println!("MOVEA {},A{} = {}", source, dest.get(), data);
-			}
+			},
 			Opcode::Move { size, dest, source } => {
 				let data = self.read_with_mode(bus, source, size, true);
 				self.set_v(false);
@@ -449,6 +486,24 @@ impl CPU {
 				let addr_cycles = self.calc_addr_cycles(addr_mode, Size::Word);
 				self.countdown += addr_cycles + instr_cycles;
 				println!("MOVE {},SR = {:#06X}", addr_mode, self.status_register);
+			},
+			Opcode::Clr { size, addr_mode } => {
+				// CLR generates a read before writing to the effective address
+				let _ = self.read_with_mode(bus, addr_mode, size, false);
+				let data = match size {
+					Size::Byte => Data::Byte(0),
+					Size::Word => Data::Word(0),
+					Size::Long => Data::Long(0),
+				};
+				self.set_n(false);
+				self.set_z(true);
+				self.set_v(false);
+				self.set_c(false);
+				self.write_with_mode(bus, addr_mode, data, true);
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				let addr_cycles = self.calc_addr_cycles(addr_mode, size);
+				self.countdown += addr_cycles + instr_cycles;
+				println!("CLR {}", addr_mode);
 			},
 			Opcode::Tst { size, addr_mode } => {
 				let data = self.read_with_mode(bus, addr_mode, size, true);
@@ -488,12 +543,19 @@ impl CPU {
 				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
 				self.countdown += instr_cycles;
 			},
+			Opcode::Jsr { addr_mode } => {
+				self.program_counter = self.calc_addr(bus, addr_mode, Size::Long, true);
+				self.push(bus, Data::Long(self.program_counter));
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				self.countdown += instr_cycles;
+				println!("JSR {}", addr_mode);
+			},
 			Opcode::Jmp { addr_mode } => {
 				self.program_counter = self.calc_addr(bus, addr_mode, Size::Long, true);
 				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
 				self.countdown += instr_cycles;
 				println!("JMP {}", addr_mode);
-			}
+			},
 			Opcode::MoveM { dir, size, addr_mode } => {
 				let reg_bits = bus.read_u16(self.program_counter);
 				self.program_counter += 2;
@@ -655,6 +717,20 @@ impl CPU {
 				let instr_cycles = calc_opcode_cycles(opcode, Some(branch_taken), Some(loop_count == 0xFFFF), None, None);
 				self.countdown += instr_cycles;
 				println!("DB{cond},{loop_down} = PC {:#010X}, {loop_down} = {loop_count:#06X}", self.program_counter);
+			},
+			Opcode::Bsr { disp } => {
+				let (displacement, return_address) = if disp == 0 {
+					let long_disp = CPU::sign_extend_u16(bus.read_u16(self.program_counter));
+					(long_disp, self.program_counter + 2)
+				}
+				else {
+					(disp, self.program_counter)
+				};
+				self.push(bus, Data::Long(return_address));
+				self.program_counter = self.program_counter.wrapping_add_signed(displacement);
+				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
+				self.countdown += instr_cycles;
+				println!("BSR = PC {:#010X}", self.program_counter);
 			}
 			Opcode::Bcc { cond, disp } => {
 				let mut branch_taken = false;
@@ -1117,7 +1193,7 @@ impl CPU {
 			},
 			// BSR
 			"0110_0001_dddd_dddd" => {
-				Opcode::BSR {
+				Opcode::Bsr {
 					disp: CPU::sign_extend_u16(d)
 				}
 			}

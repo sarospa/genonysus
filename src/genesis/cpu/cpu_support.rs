@@ -429,7 +429,7 @@ pub enum Opcode {
 	SubQ { data: u8, size: Size, addr_mode: AddrMode },
 	Scc { cond: Condition, addr_mode: AddrMode },
 	DBcc { cond: Condition, loop_down: DReg },
-	BSR { disp: i32 },
+	Bsr { disp: i32 },
 	Bcc { cond: Condition, disp: i32 },
 	MoveQ { dest: DReg, data: u8 },
 	DivU { dest: DReg, source: AddrMode },
@@ -521,7 +521,7 @@ impl fmt::Display for Opcode {
 			Opcode::SubQ { .. } => write!(f, "SUBQ"),
 			Opcode::Scc { .. } => write!(f, "Scc"),
 			Opcode::DBcc { .. } => write!(f, "DBcc"),
-			Opcode::BSR { .. } => write!(f, "BSR"),
+			Opcode::Bsr { .. } => write!(f, "BSR"),
 			Opcode::Bcc { .. } => write!(f, "Bcc"),
 			Opcode::MoveQ { .. } => write!(f, "MOVEQ"),
 			Opcode::DivU { .. } => write!(f, "DIVU"),
@@ -582,6 +582,22 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 				}
 			}
 		},
+		Opcode::EorI { size, addr_mode } => {
+			match addr_mode {
+				AddrMode::DataReg(_) => {
+					match size {
+						Size::Long => 16,
+						_ => 8,
+					}
+				},
+				_ => {
+					match size {
+						Size::Long => 20,
+						_ => 12
+					}
+				}
+			}
+		}
 		Opcode::MoveA { size, source, .. } => {
 			match size {
 				Size::Long => {
@@ -739,8 +755,41 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 			}
 		},
 		Opcode::MoveToSr { .. } => 12,
+		Opcode::Clr { size, addr_mode } => {
+			match size {
+				Size::Long => {
+					match addr_mode {
+						AddrMode::DataReg(_) => 6,
+						AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) => 12,
+						AddrMode::AddressWithPredec(_) => 14,
+						AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 16,
+						AddrMode::AddressWithIndex(_) | AddrMode::AbsoluteLong => 20,
+						_ => panic!("Invalid addressing mode {addr_mode} in opcode {opcode}"),
+					}
+				},
+				_ => {
+					match addr_mode {
+						AddrMode::DataReg(_) => 4,
+						AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) => 8,
+						AddrMode::AddressWithPredec(_) => 10,
+						AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 12,
+						AddrMode::AddressWithIndex(_) | AddrMode::AbsoluteLong => 16,
+						_ => panic!("Invalid addressing mode {addr_mode} in opcode {opcode}"),
+					}
+				}
+			}
+		}
 		Opcode::Tst { .. } => 4,
 		Opcode::MoveUsp { .. } => 4,
+		Opcode::Jsr { addr_mode } => {
+			match addr_mode {
+				AddrMode::Address(_) => 16,
+				AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort | AddrMode::PCWithDisp => 18,
+				AddrMode::AddressWithIndex(_) | AddrMode::PCWithIndex => 22,
+				AddrMode::AbsoluteLong => 20,
+				_ => panic!("Invalid addressing mode {addr_mode} in opcode {opcode}"),
+			}
+		},
 		Opcode::Jmp { addr_mode } => {
 			match addr_mode {
 				AddrMode::Address(_) => 8,
@@ -749,7 +798,7 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 				AddrMode::AbsoluteLong => 12,
 				_ => panic!("Invalid addressing mode {addr_mode} in opcode {opcode}"),
 			}
-		}
+		},
 		Opcode::MoveM { dir, addr_mode, size } => {
 			let reg_cycles = match size {
 				Size::Long => 8 * reg_count.unwrap(),
@@ -810,7 +859,8 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 				if counter_expired { 14 }
 				else { 12 }
 			}
-		}
+		},
+		Opcode::Bsr { .. } => 18,
 		Opcode::Bcc { disp, .. } => {
 			let branch_taken = branch_taken.unwrap();
 			if branch_taken { 10 }

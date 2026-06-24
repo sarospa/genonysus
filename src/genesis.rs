@@ -1,4 +1,5 @@
 mod cpu;
+mod vdp;
 
 pub const CART_SIZE: usize = 0x400000;
 pub const CPU_RAM_SIZE: usize = 0x10000;
@@ -51,6 +52,7 @@ trait Motorola68KBus {
 pub struct Genesis {
 	cpu: Option<cpu::CPU>,
 	cpu_ram: Vec<u8>,
+	vdp: vdp::VDP,
 	cart_memory: Vec<u8>,
 	controller1: Controller,
 	controller1_control: u8,
@@ -67,6 +69,7 @@ impl Genesis {
 		
 		let mut genesis = Genesis {
 			cpu: None,
+			vdp: vdp::VDP::new(),
 			cpu_ram: vec![0; CPU_RAM_SIZE],
 			cart_memory: cart_memory,
 			controller1: Controller::Unplugged,
@@ -87,6 +90,7 @@ impl Genesis {
 			cpu.advance_cycle(self);
 			self.cpu = Some(cpu);
 		}
+		self.vdp.advance_master_cycle();
 	}
 }
 impl Motorola68KBus for Genesis {
@@ -100,6 +104,8 @@ impl Motorola68KBus for Genesis {
 			0xA10008..=0xA10009 => self.controller1_control,
 			0xA1000A..=0xA1000B => self.controller2_control,
 			0xA1000C..=0xA1000D => 0, // Expansion port control
+			0xC00008 => self.vdp.get_v_counter(),
+			0xC00009 => self.vdp.get_h_counter(),
 			_ => {
 				println!("Address {:#08X} located in unimplemented memory region.", address);
 				panic!("accessed unimplemented CPU memory");
