@@ -1,3 +1,8 @@
+use std::ops::Add;
+use std::ops::BitAnd;
+use std::ops::BitOr;
+use std::ops::BitXor;
+use std::ops::Sub;
 use std::fmt;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -50,7 +55,7 @@ impl Size {
 	}
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Clone, Copy)]
 pub enum Data {
 	Byte(u8),
 	Word(u16),
@@ -80,6 +85,14 @@ impl Data {
 			Data::Long(d) => d == 0,
 		}
 	}
+	
+	pub fn max(size: Size) -> Data {
+		match size {
+			Size::Byte => Data::Byte(0xFF),
+			Size::Word => Data::Word(0xFFFF),
+			Size::Long => Data::Long(0xFFFFFFFF),
+		}
+	}
 }
 impl fmt::Display for Data {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -87,6 +100,66 @@ impl fmt::Display for Data {
 			Data::Byte(v) => write!(f, "{:#04X}", v),
 			Data::Word(v) => write!(f, "{:#06X}", v),
 			Data::Long(v) => write!(f, "{:#010X}", v),
+		}
+	}
+}
+impl Add for Data {
+	type Output = Self;
+
+	fn add(self, other: Self) -> Self {
+		match (self, other) {
+			(Data::Byte(a), Data::Byte(b)) => Data::Byte(a.wrapping_add(b)),
+			(Data::Word(a), Data::Word(b)) => Data::Word(a.wrapping_add(b)),
+			(Data::Long(a), Data::Long(b)) => Data::Long(a.wrapping_add(b)),
+			_ => panic!("Mismatched data sizes in add operation."),
+		}
+	}
+}
+impl Sub for Data {
+	type Output = Self;
+
+	fn sub(self, other: Self) -> Self {
+		match (self, other) {
+			(Data::Byte(a), Data::Byte(b)) => Data::Byte(a.wrapping_sub(b)),
+			(Data::Word(a), Data::Word(b)) => Data::Word(a.wrapping_sub(b)),
+			(Data::Long(a), Data::Long(b)) => Data::Long(a.wrapping_sub(b)),
+			_ => panic!("Mismatched data sizes in subtract operation."),
+		}
+	}
+}
+impl BitAnd for Data {
+	type Output = Self;
+
+	fn bitand(self, other: Self) -> Self {
+		match (self, other) {
+			(Data::Byte(a), Data::Byte(b)) => Data::Byte(a & b),
+			(Data::Word(a), Data::Word(b)) => Data::Word(a & b),
+			(Data::Long(a), Data::Long(b)) => Data::Long(a & b),
+			_ => panic!("Mismatched data sizes in bitwise and operation."),
+		}
+	}
+}
+impl BitOr for Data {
+	type Output = Self;
+
+	fn bitor(self, other: Self) -> Self {
+		match (self, other) {
+			(Data::Byte(a), Data::Byte(b)) => Data::Byte(a | b),
+			(Data::Word(a), Data::Word(b)) => Data::Word(a | b),
+			(Data::Long(a), Data::Long(b)) => Data::Long(a | b),
+			_ => panic!("Mismatched data sizes in bitwise or operation."),
+		}
+	}
+}
+impl BitXor for Data {
+	type Output = Self;
+
+	fn bitxor(self, other: Self) -> Self {
+		match (self, other) {
+			(Data::Byte(a), Data::Byte(b)) => Data::Byte(a ^ b),
+			(Data::Word(a), Data::Word(b)) => Data::Word(a ^ b),
+			(Data::Long(a), Data::Long(b)) => Data::Long(a ^ b),
+			_ => panic!("Mismatched data sizes in bitwise xor operation."),
 		}
 	}
 }
@@ -236,7 +309,7 @@ impl MoveDirection {
 	}
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BinOpDirection {
 	ToReg,
 	ToEA,
@@ -564,8 +637,27 @@ pub struct Flags {
 	pub c: bool,
 }
 
-pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_expired: Option<bool>, reg_count: Option<u64>, rot: Option<u64>) -> u64 {
+pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_expired: Option<bool>, special_count: Option<u64>, rot: Option<u64>) -> u64 {
 	match opcode {
+		Opcode::OrI { size, addr_mode }
+			| Opcode::SubI { size, addr_mode }
+			| Opcode::AddI { size, addr_mode }
+			| Opcode::EorI { size, addr_mode } => {
+			match addr_mode {
+				AddrMode::DataReg(_) => {
+					match size {
+						Size::Long => 16,
+						_ => 8,
+					}
+				},
+				_ => {
+					match size {
+						Size::Long => 20,
+						_ => 12,
+					}
+				}
+			}
+		},
 		Opcode::AndI { size, addr_mode } => {
 			match addr_mode {
 				AddrMode::DataReg(_) => {
@@ -582,22 +674,50 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 				}
 			}
 		},
-		Opcode::EorI { size, addr_mode } => {
+		Opcode::CmpI { size, addr_mode } => {
 			match addr_mode {
 				AddrMode::DataReg(_) => {
 					match size {
-						Size::Long => 16,
+						Size::Long => 14,
 						_ => 8,
 					}
 				},
 				_ => {
 					match size {
-						Size::Long => 20,
-						_ => 12
+						Size::Long => 12,
+						_ => 8,
 					}
 				}
 			}
-		}
+		},
+		Opcode::Btst { addr_mode } => {
+			match addr_mode {
+				AddrMode::DataReg(_) => 10,
+				_ => 8,
+			}
+		},
+		Opcode::Bchg { .. } => 12,
+		Opcode::Bclr { addr_mode } => {
+			match addr_mode {
+				AddrMode::DataReg(_) => 14,
+				_ => 12,
+			}
+		},
+		Opcode::Bset { .. } => 12,
+		Opcode::BtstFromD { addr_mode, .. } => {
+			match addr_mode {
+				AddrMode::DataReg(_) => 6,
+				_ => 4,
+			}
+		},
+		Opcode::BchgFromD { .. } => 8,
+		Opcode::BclrFromD { addr_mode, .. } => {
+			match addr_mode {
+				AddrMode::DataReg(_) => 10,
+				_ => 8,
+			}
+		},
+		Opcode::BsetFromD { .. } => 8,
 		Opcode::MoveA { size, source, .. } => {
 			match size {
 				Size::Long => {
@@ -755,32 +875,37 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 			}
 		},
 		Opcode::MoveToSr { .. } => 12,
-		Opcode::Clr { size, addr_mode } => {
+		Opcode::Clr { size, addr_mode }
+			| Opcode::Neg { size, addr_mode }
+			| Opcode::NegX { size, addr_mode }
+			| Opcode::Not { size, addr_mode } => {
 			match size {
 				Size::Long => {
 					match addr_mode {
 						AddrMode::DataReg(_) => 6,
-						AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) => 12,
-						AddrMode::AddressWithPredec(_) => 14,
-						AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 16,
-						AddrMode::AddressWithIndex(_) | AddrMode::AbsoluteLong => 20,
-						_ => panic!("Invalid addressing mode {addr_mode} in opcode {opcode}"),
+						_ => 12,
 					}
 				},
 				_ => {
 					match addr_mode {
 						AddrMode::DataReg(_) => 4,
-						AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) => 8,
-						AddrMode::AddressWithPredec(_) => 10,
-						AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort => 12,
-						AddrMode::AddressWithIndex(_) | AddrMode::AbsoluteLong => 16,
-						_ => panic!("Invalid addressing mode {addr_mode} in opcode {opcode}"),
+						_ => 6,
 					}
 				}
 			}
-		}
+		},
+		Opcode::Swap { .. } => 4,
+		Opcode::Pea { addr_mode } => {
+			match addr_mode {
+				AddrMode::Address(_) => 12,
+				AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort | AddrMode::PCWithDisp => 16,
+				AddrMode::AddressWithIndex(_) | AddrMode::AbsoluteLong | AddrMode::PCWithIndex => 20,
+				_ => panic!("Invalid addressing mode {addr_mode} in opcode {opcode}"),
+			}
+		},
 		Opcode::Tst { .. } => 4,
 		Opcode::MoveUsp { .. } => 4,
+		Opcode::Rts => 16,
 		Opcode::Jsr { addr_mode } => {
 			match addr_mode {
 				AddrMode::Address(_) => 16,
@@ -801,8 +926,8 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 		},
 		Opcode::MoveM { dir, addr_mode, size } => {
 			let reg_cycles = match size {
-				Size::Long => 8 * reg_count.unwrap(),
-				_ => 4 * reg_count.unwrap(),
+				Size::Long => 8 * special_count.unwrap(),
+				_ => 4 * special_count.unwrap(),
 			};
 			match dir {
 				MoveDirection::MemToReg => {
@@ -831,6 +956,24 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 				AddrMode::AddressWithDisp(_) | AddrMode::AbsoluteShort | AddrMode::PCWithDisp => 8,
 				AddrMode::AddressWithIndex(_) | AddrMode::AbsoluteLong | AddrMode::PCWithIndex => 12,
 				_ => panic!("Invalid address mode {addr_mode} on {opcode}.")
+			}
+		},
+		Opcode::AddQ { size, addr_mode, .. } => {
+			match size {
+				Size::Long => {
+					match addr_mode {
+						AddrMode::DataReg(_) => 8,
+						AddrMode::AddressReg(_) => 8,
+						_ => 12,
+					}
+				},
+				_ => {
+					match addr_mode {
+						AddrMode::DataReg(_) => 4,
+						AddrMode::AddressReg(_) => 4,
+						_ => 8,
+					}
+				}
 			}
 		},
 		Opcode::SubQ { size, addr_mode, .. } => {
@@ -870,6 +1013,64 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 			}
 		},
 		Opcode::MoveQ { .. } => 4,
+		Opcode::Or { dir, size, addr_mode, .. }
+			| Opcode::Sub { dir, size, addr_mode, .. }
+			| Opcode::And { dir, size, addr_mode, .. }
+			| Opcode::Add { dir, size, addr_mode, .. } => {
+			match size {
+				Size::Long => {
+					match dir {
+						BinOpDirection::ToReg => {
+							match addr_mode {
+								AddrMode::AddressReg(_) | AddrMode::DataReg(_) | AddrMode::Immediate => 8,
+								_ => 6,
+							}
+						},
+						BinOpDirection::ToEA => 12,
+					}
+				},
+				_ => {
+					match dir {
+						BinOpDirection::ToReg => 4,
+						BinOpDirection::ToEA => 8,
+					}
+				},
+			}
+		},
+		Opcode::SubA { size, source, .. }
+			| Opcode::AddA { size, source, .. } => {
+			match size {
+				Size::Long => {
+					match source {
+						AddrMode::AddressReg(_) | AddrMode::DataReg(_) | AddrMode::Immediate => 8,
+						_ => 6,
+					}
+				},
+				_ => 8,
+			}
+		},
+		Opcode::MulU { .. } => 38 + (2 * special_count.unwrap()),
+		Opcode::And { dir, size, addr_mode, .. } => {
+			match size {
+				Size::Long => {
+					match dir {
+						BinOpDirection::ToReg => {
+							match addr_mode {
+								AddrMode::DataReg(_) | AddrMode::Immediate => 8,
+								_ => 4,
+							}
+						},
+						BinOpDirection::ToEA => 12,
+					}
+				},
+				_ => {
+					match dir {
+						BinOpDirection::ToReg => 4,
+						BinOpDirection::ToEA => 8,
+					}
+				}
+			}
+		},
 		Opcode::LsdToD { size, .. } => {
 			let rotation = rot.unwrap();
 			match size {

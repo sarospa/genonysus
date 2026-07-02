@@ -25,6 +25,10 @@ target
 *.gen
 *.htm
 *_files*
+*.png
 
 # Log files
 *.txt
+
+# RustRover stuff
+.idea/*

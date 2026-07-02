@@ -44,6 +44,26 @@ pub struct VDP {
 	auto_increment: u16,
 	plane_height: u16,
 	plane_width: u16,
+	window_right: bool,
+	window_h: u16,
+	window_down: bool,
+	window_v: u16,
+	dma_length: u16,
+	dma_source: u32,
+	dma_type: DmaType,
+	data_command: bool,
+	data_address: u16,
+	data_type: DataType,
+	data_type_bits: u16,
+	fifo_full: bool,
+	v_interrupt_triggered: bool,
+	scanline_sprite_overflow: bool,
+	sprite_overlap: bool,
+	odd_frame: bool,
+	dma_active: bool,
+	queue: [u16; 4],
+	queue_index: usize,
+	queue_size: u8,
 }
 impl VDP {
 	pub fn new() -> VDP {
@@ -90,6 +110,26 @@ impl VDP {
 			auto_increment: 0,
 			plane_height: 0,
 			plane_width: 0,
+			window_right: false,
+			window_h: 0,
+			window_down: false,
+			window_v: 0,
+			dma_length: 0,
+			dma_source: 0,
+			dma_type: DmaType::Cpu,
+			data_command: false,
+			data_address: 0,
+			data_type: DataType::VramRead,
+			data_type_bits: 0,
+			fifo_full: false,
+			v_interrupt_triggered: false,
+			scanline_sprite_overflow: false,
+			sprite_overlap: false,
+			odd_frame: false,
+			dma_active: false,
+			queue: [0, 0, 0, 0],
+			queue_index: 0,
+			queue_size: 0,
 		}
 	}
 	
@@ -166,6 +206,9 @@ impl VDP {
 	
 	#[bitmatch]
 	pub fn write_register(&mut self, data: u16) {
+		if data & 0xF000 != 0 {
+			self.data_command = false;
+		}
 		#[bitmatch]
 		match data {
 			"1000_0000_??cd_?fgh" => {
@@ -257,7 +300,99 @@ impl VDP {
 				self.plane_height = height;
 				self.plane_height = width;
 			},
-			_ => panic!("Unimplemented VDP register {:#04X}.", (data >> 8)),
+			"1001_0001_r??h_hhhh" => {
+				self.window_right = r == 1;
+				self.window_h = h;
+			},
+			"1001_0010_d??v_vvvv" => {
+				self.window_down = d == 1;
+				self.window_v = v;
+			},
+			"1001_0011_dddd_dddd" => {
+				self.dma_length = (self.dma_length & 0xFF00) | d;
+			}
+			"1001_0100_dddd_dddd" => {
+				self.dma_length = (self.dma_length & 0x00FF) | (d << 8);
+			},
+			"1001_0101_aaaa_aaaa" => {
+				self.dma_source = (self.dma_source & 0xFFFF00) | (a as u32);
+			},
+			"1001_0110_aaaa_aaaa" => {
+				self.dma_source = (self.dma_source & 0xFF00FF) | ((a as u32) << 8);
+			},
+			"1001_0111_ttaa_aaaa" => {
+				self.dma_source = (self.dma_source & 0x00FFFF) | ((a as u32) << 16);
+				self.dma_type = match t {
+					0b10 => DmaType::Fill,
+					0b11 => DmaType::Copy,
+					_ => {
+						self.dma_source = (self.dma_source & 0x3FFFFF) | (((t as u32) & 0x1) << 22);
+						DmaType::Cpu
+					}
+				};
+			},
+			"0000_0000_cccc_00aa" if self.data_command => {
+				self.data_type_bits = self.data_type_bits | (c << 2);
+				self.data_address = self.data_address | (a << 14);
+				self.data_type = match self.data_type_bits & 0xF {
+					0b0000 => DataType::VramRead,
+					0b0001 => DataType::VramWrite,
+					0b1000 => DataType::CramRead,
+					0b0011 => DataType::CramWrite,
+					0b0100 => DataType::VsramRead,
+					0b0101 => DataType::VsramWrite,
+					0b1100 => DataType::EightBit,
+					_ => panic!("Invalid VDP data type."),
+				};
+				self.dma_active = (self.data_type_bits & 0b010000) == 0b010000;
+				self.data_command = false;
+			},
+			"ccaa_aaaa_aaaa_aaaa" => {
+				self.data_type_bits = c;
+				self.data_address = a;
+				self.data_command = true;
+			},
+			_ => panic!("Unimplemented VDP control write {data:#06X}."),
+		}
+	}
+	
+	pub fn read_register_upper(&self) -> u8 {
+		let bit_1 = if !self.fifo_full { 0b10 }
+		else { 0 };
+		let bit_0 = if self.fifo_full { 0b1 }
+		else { 0 };
+		0b00110100 | bit_1 | bit_0
+	}
+	
+	pub fn read_register_lower(&self) -> u8 {
+		let bit_7 = if self.v_interrupt_triggered { 0b10000000 }
+		else { 0 };
+		let bit_6 = if self.scanline_sprite_overflow {0b1000000 }
+		else { 0 };
+		let bit_5 = if self.sprite_overlap { 0b100000 }
+		else { 0 };
+		let bit_4 = if self.odd_frame { 0b10000 }
+		else { 0 };
+		let bit_3 = if self.v_blank { 0b1000 }
+		else { 0 };
+		let bit_2 = if self.h_blank { 0b100 }
+		else { 0 };
+		let bit_1 = if self.dma_active { 0b10 }
+		else { 0 };
+		let bit_0 = if self.v_resolution { 0b1 }
+		else { 0 };
+		bit_7 | bit_6 | bit_5 | bit_4 | bit_3 | bit_2 | bit_1 | bit_0
+	}
+
+	fn write_data(&mut self, data: u16) -> bool {
+		if self.queue_size < 4 {
+			self.queue[self.queue_index] = data;
+			self.queue_size += 1;
+			self.queue_index = (self.queue_index + 1) % 4;
+			true
+		}
+		else {
+			false
 		}
 	}
 }
@@ -274,4 +409,22 @@ enum InterlaceMode {
 	NoInterlace,
 	NormalInterlace,
 	DoubleInterlace,
+}
+
+#[derive(Debug)]
+enum DmaType {
+	Cpu,
+	Fill,
+	Copy
+}
+
+#[derive(Debug)]
+enum DataType {
+	VramRead,
+	VramWrite,
+	CramRead,
+	CramWrite,
+	VsramRead,
+	VsramWrite,
+	EightBit,
 }

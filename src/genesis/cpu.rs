@@ -103,7 +103,7 @@ impl CPU {
 		}
 	}
 	
-	fn write_register(&mut self, data: Data, reg: Register) {
+	fn write_register(&mut self, reg: Register, data: Data) {
 		let reg_value = match reg {
 			Register::A(a) => {
 				if a.get() < 7 {
@@ -143,8 +143,8 @@ impl CPU {
 		self.write_with_mode(bus, AddrMode::AddressWithPredec(7), data, true);
 	}
 	
-	fn pop(&mut self, bus: &mut dyn Motorola68KBus, size: Size) {
-		self.read_with_mode(bus, AddrMode::AddressWithPostinc(7), size, true);
+	fn pop(&mut self, bus: &mut dyn Motorola68KBus, size: Size) -> Data {
+		self.read_with_mode(bus, AddrMode::AddressWithPostinc(7), size, true)
 	}
 	
 	fn decode_addressing_mode(&self, addressing_bits: u8) -> AddrMode {
@@ -230,17 +230,17 @@ impl CPU {
 				CPU::write(bus, address, data);
 			},
 			AddrMode::DataReg(reg) => {
-				self.write_register(data, Register::new(reg as usize, false))
+				self.write_register(Register::new(reg as usize, false), data)
 			},
 			AddrMode::AddressReg(reg) => {
-				self.write_register(data, Register::new(reg as usize, true))
+				self.write_register(Register::new(reg as usize, true), data)
 			},
 			_ => panic!("Unimplemented write addressing mode {:?}.", addr_mode),
 		}
 	}
 	
 	fn calc_addr(&mut self, bus: &dyn Motorola68KBus, addr_mode: AddrMode, size: Size, advance: bool) -> u32 {
-		match addr_mode {
+		let address = match addr_mode {
 			AddrMode::Address(reg) => {
 				self.read_register_u32(Register::new(reg, true))
 			},
@@ -250,10 +250,9 @@ impl CPU {
 				if advance {
 					// Stack pointer always increments by a minimum of 2 bytes
 					if reg == 7 && size == Size::Byte {
-						self.write_register(Data::Long(address.wrapping_add(2)), register)
-					}
-					else {
-						self.write_register(Data::Long(address.wrapping_add(size.length())), register);
+						self.write_register(register, Data::Long(address.wrapping_add(2)))
+					} else {
+						self.write_register(register, Data::Long(address.wrapping_add(size.length())));
 					}
 				}
 				address
@@ -264,10 +263,9 @@ impl CPU {
 				if advance {
 					// Stack pointer always decrements by a minimum of 2 bytes
 					if reg == 7 && size == Size::Byte {
-						self.write_register(Data::Long(address.wrapping_sub(2)), register)
-					}
-					else {
-						self.write_register(Data::Long(address.wrapping_sub(size.length())), register);
+						self.write_register(register, Data::Long(address.wrapping_sub(2)))
+					} else {
+						self.write_register(register, Data::Long(address.wrapping_sub(size.length())));
 					};
 				};
 				address.wrapping_sub(size.length())
@@ -279,6 +277,19 @@ impl CPU {
 					self.program_counter += 2;
 				};
 				address.wrapping_add_signed(disp)
+			},
+			AddrMode::AddressWithIndex(reg) => {
+				let extension_word = bus.read_u16(self.program_counter);
+				let index: i32 = CPU::sign_extend_u8((extension_word & 0xFF) as u8);
+				let address = self.read_register_u32(Register::new(reg, true));
+				let mode = (index & 0x8000) >> 15;
+				let reg_2 = (index & 0x7000) >> 12;
+				let size = if ((index & 0x0800) >> 11) == 1 { Size::Long } else { Size::Word };
+				let reg_data = self.read_register(Register::new(reg_2 as usize, mode == 1), size).sign_extend();
+				match reg_data {
+					Data::Long(d) => address.wrapping_add_signed(index).wrapping_add(d),
+					_ => panic!("Invalid size in Address With Index"),
+				}
 			},
 			AddrMode::PCWithDisp => {
 				let disp: i32 = CPU::sign_extend_u16(bus.read_u16(self.program_counter));
@@ -303,7 +314,8 @@ impl CPU {
 				address
 			},
 			_ => panic!("Unimplemented address calculation addressing mode {:?}.", addr_mode),
-		}
+		};
+		address & 0x00FFFFFF
 	}
 	
 	fn calc_addr_cycles(&mut self, addr_mode: AddrMode, size: Size) -> u64 {
@@ -385,106 +397,128 @@ impl CPU {
 			c: self.status_register & 0b0000000000000001 == 0b00000001,
 		}
 	}
+
+	fn handle_result_flags(&mut self, data: Data) {
+		self.set_n(data.is_negative());
+		self.set_z(data.is_zero());
+		self.set_v(false);
+		self.set_c(false);
+	}
+
+	fn handle_add_flags(&mut self, dest: Data, source: Data, result: Data) {
+		self.set_x(result < dest || result < source);
+		self.set_n(result.is_negative());
+		self.set_z(result.is_zero());
+		self.set_v(dest.is_negative() == source.is_negative() && dest.is_negative() != result.is_negative());
+		self.set_c(result < dest || result < source);
+	}
+
+	fn handle_sub_flags(&mut self, dest: Data, source: Data, result: Data) {
+		self.set_x(result > dest || result > source);
+		self.set_n(result.is_negative());
+		self.set_z(result.is_zero());
+		self.set_v(dest.is_negative() != source.is_negative() && dest.is_negative() != result.is_negative());
+		self.set_c(result > dest || result > source);
+	}
+
+	fn handle_compare_flags(&mut self, dest: Data, source: Data, result: Data) {
+		self.set_n(result.is_negative());
+		self.set_z(result.is_zero());
+		self.set_v(dest.is_negative() != source.is_negative() && dest.is_negative() != result.is_negative());
+		self.set_c(result > dest || result > source);
+	}
 	
 	#[bitmatch]
 	pub fn run_opcode(&mut self, bus: &mut dyn Motorola68KBus) -> () {
 		print!("{:#010X} {:#010} ", self.program_counter, self.cycles);
 		let opcode = self.decode_opcode(bus);
 		self.program_counter += 2;
+		let mut cycles = 0;
 		match opcode {
+			Opcode::OrI { size, addr_mode } => {
+				let imm = self.read_with_mode(bus, AddrMode::Immediate, size, true);
+				let data = self.read_with_mode(bus, addr_mode, size, false);
+				let data = imm | data;
+				self.handle_result_flags(data);
+				self.write_with_mode(bus, addr_mode, data, true);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				println!("ORI {},{} = {}", imm, addr_mode, data);
+			},
 			Opcode::AndI { size, addr_mode } => {
 				let imm = self.read_with_mode(bus, AddrMode::Immediate, size, true);
 				let data = self.read_with_mode(bus, addr_mode, size, false);
-				let data = match (imm, data) {
-					(Data::Byte(a), Data::Byte(b)) => Data::Byte(a & b),
-					(Data::Word(a), Data::Word(b)) => Data::Word(a & b),
-					(Data::Long(a), Data::Long(b)) => Data::Long(a & b),
-					_ => panic!("Non-matching data in ANDI"),
-				};
-				match data {
-					Data::Byte(d) => {
-						self.set_n((d & 0x80) == 0x80);
-						self.set_z(d == 0);
-					},
-					Data::Word(d) => {
-						self.set_n((d & 0x8000) == 0x8000);
-						self.set_z(d == 0);
-					},
-					Data::Long(d) => {
-						self.set_n((d & 0x80000000) == 0x80000000);
-						self.set_z(d == 0);
-					},
-				};
+				let data = imm & data;
+				self.handle_result_flags(data);
 				self.write_with_mode(bus, addr_mode, data, true);
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				let addr_cycles = self.calc_addr_cycles(addr_mode, size);
-				self.countdown += addr_cycles + instr_cycles;
-				println!("ANDI {},{} = {}", imm, addr_mode, data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				println!("ANDI #{imm},{addr_mode} = {data}");
+			},
+			Opcode::SubI { size, addr_mode } => {
+				let imm = self.read_with_mode(bus, AddrMode::Immediate, size, true);
+				let data = self.read_with_mode(bus, addr_mode, size, false);
+				let new_data = data - imm;
+				self.handle_sub_flags(data, imm, new_data);
+				self.write_with_mode(bus, addr_mode, new_data, true);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				println!("SUBI #{imm},{addr_mode} = {new_data}");
+			},
+			Opcode::AddI { size, addr_mode } => {
+				let imm = self.read_with_mode(bus, AddrMode::Immediate, size, true);
+				let data = self.read_with_mode(bus, addr_mode, size, false);
+				let new_data = data + imm;
+				self.handle_add_flags(data, imm, new_data);
+				self.write_with_mode(bus, addr_mode, new_data, true);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				println!("ADDI #{imm},{addr_mode} = {new_data}");
 			},
 			Opcode::EorI { size, addr_mode } => {
 				let imm = self.read_with_mode(bus, AddrMode::Immediate, size, true);
 				let data = self.read_with_mode(bus, addr_mode, size, false);
-				let data = match (imm, data) {
-					(Data::Byte(a), Data::Byte(b)) => Data::Byte(a ^ b),
-					(Data::Word(a), Data::Word(b)) => Data::Word(a ^ b),
-					(Data::Long(a), Data::Long(b)) => Data::Long(a ^ b),
-					_ => panic!("Non-matching data in EORI"),
-				};
-				match data {
-					Data::Byte(d) => {
-						self.set_n((d & 0x80) == 0x80);
-						self.set_z(d == 0);
-					},
-					Data::Word(d) => {
-						self.set_n((d & 0x8000) == 0x8000);
-						self.set_z(d == 0);
-					},
-					Data::Long(d) => {
-						self.set_n((d & 0x80000000) == 0x80000000);
-						self.set_z(d == 0);
-					},
-				};
+				let data = imm ^ data;
+				self.handle_result_flags(data);
 				self.write_with_mode(bus, addr_mode, data, true);
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				let addr_cycles = self.calc_addr_cycles(addr_mode, size);
-				self.countdown += addr_cycles + instr_cycles;
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
 				println!("EORI {},{} = {}", imm, addr_mode, data);
+			},
+			Opcode::CmpI { size, addr_mode } => {
+				let imm = self.read_with_mode(bus, AddrMode::Immediate, size, true);
+				let data = self.read_with_mode(bus, addr_mode, size, true);
+				let new_data = data - imm;
+				self.handle_compare_flags(data, imm, new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				println!("CMPI #imm,{addr_mode}");
+			},
+			Opcode::Btst { addr_mode } => {
+				let size = match addr_mode {
+					AddrMode::DataReg(_) => Size::Long,
+					_ => Size::Byte,
+				};
+				let data = self.read_with_mode(bus, addr_mode, size, true);
+				let bit_select = self.read_with_mode(bus, AddrMode::Immediate, Size::Word, true);
+				match (data, bit_select) {
+					(Data::Byte(d), Data::Word(s)) => self.set_z(((d >> (s % 8)) & 0b1) == 0),
+					(Data::Long(d), Data::Word(s)) => self.set_z(((d >> (s % 32)) & 0b1) == 0),
+					_ => panic!("Incorrect data sizes in BTST"),
+				};
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				println!("BTST #{bit_select},{addr_mode}");
 			}
 			Opcode::MoveA { size, dest, source } => {
 				let data = self.read_with_mode(bus, source, size, true);
-				self.write_register(data.sign_extend(), Register::from_areg(dest));
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				self.countdown += instr_cycles;
+				self.write_register(Register::from_areg(dest), data.sign_extend());
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
 				println!("MOVEA {},A{} = {}", source, dest.get(), data);
 			},
 			Opcode::Move { size, dest, source } => {
 				let data = self.read_with_mode(bus, source, size, true);
-				self.set_v(false);
-				self.set_c(false);
-				match data {
-					Data::Byte(d) => {
-						self.set_n((d & 0x80) == 0x80);
-						self.set_z(d == 0);
-					},
-					Data::Word(d) => {
-						self.set_n((d & 0x8000) == 0x8000);
-						self.set_z(d == 0);
-					},
-					Data::Long(d) => {
-						self.set_n((d & 0x80000000) == 0x80000000);
-						self.set_z(d == 0);
-					},
-				};
+				self.handle_result_flags(data);
 				self.write_with_mode(bus, dest, data, true);
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				self.countdown += instr_cycles;
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
 				println!("MOVE {},{} = {}", source, dest, data);
 			},
 			Opcode::MoveToSr { addr_mode } => {
 				self.status_register = self.read_with_mode_u16(bus, addr_mode, true);
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				let addr_cycles = self.calc_addr_cycles(addr_mode, Size::Word);
-				self.countdown += addr_cycles + instr_cycles;
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, Size::Word);
 				println!("MOVE {},SR = {:#06X}", addr_mode, self.status_register);
 			},
 			Opcode::Clr { size, addr_mode } => {
@@ -500,32 +534,33 @@ impl CPU {
 				self.set_v(false);
 				self.set_c(false);
 				self.write_with_mode(bus, addr_mode, data, true);
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				let addr_cycles = self.calc_addr_cycles(addr_mode, size);
-				self.countdown += addr_cycles + instr_cycles;
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
 				println!("CLR {}", addr_mode);
 			},
+			Opcode::Swap { dest } => {
+				let register = Register::from_dreg(dest);
+				let data = self.read_register_u32(register);
+				let new_data = Data::Long((data << 16) | (data >> 16));
+				self.handle_result_flags(new_data);
+				self.write_register(register, new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				println!("SWAP {register} = {new_data}");
+			},
+			Opcode::Pea { addr_mode } => {
+				let address = self.calc_addr(bus, addr_mode, Size::Long, true);
+				self.push(bus, Data::Long(address));
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				println!("PEA {}", addr_mode);
+			}
 			Opcode::Tst { size, addr_mode } => {
 				let data = self.read_with_mode(bus, addr_mode, size, true);
-				self.set_v(false);
-				self.set_c(false);
-				match data {
-					Data::Byte(val) => {
-						self.set_n((val as i8) < 0);
-						self.set_z((val as i8) == 0);
-					}
-					Data::Word(val) => {
-						self.set_n((val as i16) < 0);
-						self.set_z((val as i16) == 0);
-					}
-					Data::Long(val) => {
-						self.set_n((val as i32) < 0);
-						self.set_z((val as i32) == 0);
-					}
-				}
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				let addr_cycles = self.calc_addr_cycles(addr_mode, Size::Word);
-				self.countdown += addr_cycles + instr_cycles;
+				let zero = match size {
+					Size::Byte => Data::Byte(0),
+					Size::Word => Data::Word(0),
+					Size::Long => Data::Long(0),
+				};
+				self.handle_compare_flags(data, zero, data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
 				println!("TST {} = CCR {:#04X}", addr_mode, self.status_register);
 			},
 			Opcode::MoveUsp { dir, a } => {
@@ -536,24 +571,38 @@ impl CPU {
 						println!("MOVE {},USP", a);
 					}
 					MoveDirection::MemToReg => {
-						self.write_register(Data::Long(self.usp), Register::from_areg(a));
+						self.write_register(Register::from_areg(a), Data::Long(self.usp));
 						println!("MOVE USP,{}", a);
 					}
 				};
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				self.countdown += instr_cycles;
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
 			},
+			Opcode::Not { size, addr_mode } => {
+				let data = self.read_with_mode(bus, addr_mode, size, false) ^ Data::max(size);
+				self.handle_result_flags(data);
+				self.write_with_mode(bus, addr_mode, data, true);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				println!("NOT {addr_mode} = {data}");
+			}
+			Opcode::Rts => {
+				let pc = self.pop(bus, Size::Long);
+				match pc {
+					Data::Long(d) => self.program_counter = d,
+					_ => panic!("Incorrect data size in RTS"),
+				};
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				println!("RTS");
+			}
 			Opcode::Jsr { addr_mode } => {
-				self.program_counter = self.calc_addr(bus, addr_mode, Size::Long, true);
+				let jump_pc = self.calc_addr(bus, addr_mode, Size::Long, true);
 				self.push(bus, Data::Long(self.program_counter));
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				self.countdown += instr_cycles;
+				self.program_counter = jump_pc;
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
 				println!("JSR {}", addr_mode);
 			},
 			Opcode::Jmp { addr_mode } => {
 				self.program_counter = self.calc_addr(bus, addr_mode, Size::Long, true);
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				self.countdown += instr_cycles;
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
 				println!("JMP {}", addr_mode);
 			},
 			Opcode::MoveM { dir, size, addr_mode } => {
@@ -603,50 +652,35 @@ impl CPU {
 						, i == 1, j == 1, k == 1, l == 1, m == 1, n == 1, o == 1, p == 1]
 					}
 				};
-				let mut address = self.calc_addr(bus, addr_mode, size, true);
 				let mut reg_count = 0;
 				match dir {
 					MoveDirection::RegToMem => {
-						for i in 15..=0 {
+						for i in (0..16).rev() {
 							if reg_flags[i] {
-								if let AddrMode::AddressWithPredec(_) = addr_mode {
-									address -= size.length();
-								};
-								CPU::write(bus, address, self.read_register(reg_list[i], size));
-								if let AddrMode::AddressWithPredec(_) = addr_mode { }
-								else {
-									address += size.length();
-								};
+								let data = self.read_register(reg_list[i], size);
+								self.write_with_mode(bus, addr_mode, data, true);
 								reg_count += 1;
 							}
-						};
-						if let AddrMode::AddressWithPredec(reg) = addr_mode {
-							self.write_register(Data::Long(address), Register::new(reg, true));
 						};
 						println!("MOVEM {:#06X},{}", reg_bits, addr_mode);
 					},
 					MoveDirection::MemToReg => {
-						for i in 15..=0 {
+						for i in (0..16).rev() {
 							if reg_flags[i] {
-								self.write_register(CPU::read(bus, address, size), reg_list[i]);
-								address += size.length();
+								let data = self.read_with_mode(bus, addr_mode, size, true);
+								self.write_register(reg_list[i], data);
 								reg_count += 1;
 							}
-						};
-						if let AddrMode::AddressWithPostinc(reg) = addr_mode {
-							self.write_register(Data::Long(address), Register::new(reg, true));
 						};
 						println!("MOVEM {},{:#06X}", addr_mode, reg_bits);
 					}
 				};
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, Some(reg_count), None);
-				self.countdown += instr_cycles;
+				cycles += calc_opcode_cycles(opcode, None, None, Some(reg_count), None);
 			},
 			Opcode::Lea { dest, addr_mode } => {
 				let address = self.calc_addr(bus, addr_mode, Size::Long, true);
-				self.write_register(Data::Long(address), Register::new(dest.get(), true));
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				self.countdown += instr_cycles;
+				self.write_register(Register::new(dest.get(), true), Data::Long(address));
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
 				println!("LEA {},A{} = {:#010X}", addr_mode, dest.get(), address);
 			},
 			Opcode::AddQ { data, size, addr_mode } => {
@@ -655,20 +689,18 @@ impl CPU {
 					_ => size,
 				};
 				let value = self.read_with_mode(bus, addr_mode, size, false);
-				let new_value = match value {
-					Data::Byte(d) => Data::Byte(d.wrapping_add(data)),
-					Data::Word(d) => Data::Word(d.wrapping_add(data.into())),
-					Data::Long(d) => Data::Long(d.wrapping_add(data.into())),
+				let data = match size {
+					Size::Byte => Data::Byte(data),
+					Size::Word => Data::Word(data as u16),
+					Size::Long => Data::Long(data as u32),
 				};
+				let new_value = value + data;
 				if let AddrMode::AddressReg(_) = addr_mode { }
 				else {
-					self.set_x(value.is_negative() && !new_value.is_negative());
-					self.set_n(new_value.is_negative());
-					self.set_z(new_value.is_zero());
-					self.set_v(!value.is_negative() && new_value.is_negative());
-					self.set_c(value.is_negative() && !new_value.is_negative());
+					self.handle_add_flags(value, data, new_value);
 				};
 				self.write_with_mode(bus, addr_mode, new_value, true);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
 				println!("ADDQ #{data},{addr_mode}");
 			},
 			Opcode::SubQ { data, size, addr_mode } => {
@@ -677,23 +709,18 @@ impl CPU {
 					_ => size,
 				};
 				let value = self.read_with_mode(bus, addr_mode, size, false);
-				let new_value = match value {
-					Data::Byte(d) => Data::Byte(d.wrapping_sub(data)),
-					Data::Word(d) => Data::Word(d.wrapping_sub(data.into())),
-					Data::Long(d) => Data::Long(d.wrapping_sub(data.into())),
+				let data = match size {
+					Size::Byte => Data::Byte(data),
+					Size::Word => Data::Word(data as u16),
+					Size::Long => Data::Long(data as u32),
 				};
+				let new_value = value - data;
 				if let AddrMode::AddressReg(_) = addr_mode { }
 				else {
-					self.set_x(value.is_negative() && !new_value.is_negative());
-					self.set_n(new_value.is_negative());
-					self.set_z(new_value.is_zero());
-					self.set_v(!value.is_negative() && new_value.is_negative());
-					self.set_c(value.is_negative() && !new_value.is_negative());
+					self.handle_sub_flags(value, data, new_value);
 				};
 				self.write_with_mode(bus, addr_mode, new_value, true);
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				let addr_cycles = self.calc_addr_cycles(addr_mode, size);
-				self.countdown += addr_cycles + instr_cycles;
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
 				println!("SUBQ #{data},{addr_mode}");
 			}
 			Opcode::DBcc { cond, loop_down } => {
@@ -702,7 +729,7 @@ impl CPU {
 				let mut loop_count = self.read_register_u16(Register::from_dreg(loop_down));
 				if !cond.check(self.get_ccr_flags()) {
 					loop_count = loop_count.wrapping_add_signed(-1);
-					self.write_register(Data::Word(loop_count), Register::from_dreg(loop_down));
+					self.write_register(Register::from_dreg(loop_down), Data::Word(loop_count));
 					if loop_count & 0x8000 == 0 { // If loop count is positive
 						self.program_counter = self.program_counter.wrapping_add_signed(disp);
 						branch_taken = true;
@@ -714,8 +741,7 @@ impl CPU {
 				else {
 					self.program_counter += 2;
 				}
-				let instr_cycles = calc_opcode_cycles(opcode, Some(branch_taken), Some(loop_count == 0xFFFF), None, None);
-				self.countdown += instr_cycles;
+				cycles += calc_opcode_cycles(opcode, Some(branch_taken), Some(loop_count == 0xFFFF), None, None);
 				println!("DB{cond},{loop_down} = PC {:#010X}, {loop_down} = {loop_count:#06X}", self.program_counter);
 			},
 			Opcode::Bsr { disp } => {
@@ -728,8 +754,7 @@ impl CPU {
 				};
 				self.push(bus, Data::Long(return_address));
 				self.program_counter = self.program_counter.wrapping_add_signed(displacement);
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				self.countdown += instr_cycles;
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
 				println!("BSR = PC {:#010X}", self.program_counter);
 			}
 			Opcode::Bcc { cond, disp } => {
@@ -748,8 +773,7 @@ impl CPU {
 				else if disp == 0 {
 					self.program_counter += 2;
 				}
-				let instr_cycles = calc_opcode_cycles(opcode, Some(branch_taken), None, None, None);
-				self.countdown += instr_cycles;
+				cycles += calc_opcode_cycles(opcode, Some(branch_taken), None, None, None);
 				println!("B{cond} = PC {:#010X}", self.program_counter);
 			},
 			Opcode::MoveQ { dest, data } => {
@@ -757,11 +781,125 @@ impl CPU {
 				self.set_z(data == 0);
 				self.set_v(false);
 				self.set_c(false);
-				self.write_register(Data::Long(CPU::sign_extend_u8(data) as u32), Register::from_dreg(dest));
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, None);
-				self.countdown += instr_cycles;
+				self.write_register(Register::from_dreg(dest), Data::Long(CPU::sign_extend_u8(data) as u32));
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
 				let d = dest.get();
 				println!("MOVEQ = D{} {:#010X}", d, self.d[d]);
+			},
+			Opcode::Or { reg, dir, size, addr_mode } => {
+				let register = Register::from_dreg(reg);
+				let ea_data = self.read_with_mode(bus, addr_mode, size, dir == BinOpDirection::ToReg);
+				let reg_data = self.read_register(register, size);
+				let new_data = ea_data | reg_data;
+				match dir {
+					BinOpDirection::ToEA => {
+						self.write_with_mode(bus, addr_mode, new_data, true);
+						println!("OR {reg},{addr_mode} = {new_data}");
+					},
+					BinOpDirection::ToReg => {
+						self.write_register(register, new_data);
+						println!("OR {addr_mode},{reg} = {new_data}");
+					},
+				};
+				self.handle_result_flags(new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+			},
+			Opcode::Sub { reg, dir, size, addr_mode } => {
+				let register = Register::from_dreg(reg);
+				let ea_data = self.read_with_mode(bus, addr_mode, size, dir == BinOpDirection::ToReg);
+				let reg_data = self.read_register(register, size);
+				let source = match dir {
+					BinOpDirection::ToReg => ea_data,
+					BinOpDirection::ToEA => reg_data,
+				};
+				let dest = match dir {
+					BinOpDirection::ToReg => reg_data,
+					BinOpDirection::ToEA => ea_data,
+				};
+				let new_data = dest - source;
+				match dir {
+					BinOpDirection::ToReg => {
+						self.write_register(register, new_data);
+						println!("SUB {addr_mode},{register} = {new_data}");
+					},
+					BinOpDirection::ToEA => {
+						self.write_with_mode(bus, addr_mode, new_data, true);
+						println!("SUB {register},{addr_mode} = {new_data}");
+					}
+				};
+				self.handle_sub_flags(dest, source, new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+			}
+			Opcode::SubA { dest, size, source } => {
+				let register = Register::from_areg(dest);
+				let ea_data = self.read_with_mode(bus, source, size, true).sign_extend();
+				let reg_data = self.read_register(register, Size::Long);
+				let new_data = reg_data - ea_data;
+				self.write_register(register, new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				println!("SUBA {source},{dest} = {new_data}");
+			},
+			Opcode::MulU { dest, source } => {
+				let register = Register::from_dreg(dest);
+				let source_data = self.read_with_mode_u16(bus, source, true);
+				let dest_data = self.read_register_u16(register);
+				let new_data = (source_data as u32) * (dest_data as u32);
+				let mut calc_count = 0; // Cycle count increases based on number of 1s in EA
+				for n in 0..16 {
+					calc_count += (source_data >> n) & 1;
+				}
+				self.write_register(register, Data::Long(new_data));
+				cycles += calc_opcode_cycles(opcode, None, None, Some(calc_count as u64), None);
+				println!("MULU {source},{dest} = {new_data:#010X}");
+			}
+			Opcode::And { reg, dir, size, addr_mode } => {
+				let register = Register::from_dreg(reg);
+				let ea_data = self.read_with_mode(bus, addr_mode, size, dir == BinOpDirection::ToReg);
+				let reg_data = self.read_register(register, size);
+				let new_data = ea_data & reg_data;
+				match dir {
+					BinOpDirection::ToEA => {
+						self.write_with_mode(bus, addr_mode, new_data, true);
+						println!("AND {reg},{addr_mode} = {new_data}");
+					},
+					BinOpDirection::ToReg => {
+						self.write_register(register, new_data);
+						println!("AND {addr_mode},{reg} = {new_data}");
+					},
+				};
+				self.handle_result_flags(new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+			},
+			Opcode::Add { reg, dir, size, addr_mode } => {
+				let register = Register::from_dreg(reg);
+				let ea_data = self.read_with_mode(bus, addr_mode, size, dir == BinOpDirection::ToReg);
+				let reg_data = self.read_register(register, size);
+				let (source, dest) = match dir {
+					BinOpDirection::ToReg => (ea_data, reg_data),
+					BinOpDirection::ToEA => (reg_data, ea_data),
+				};
+				let new_data = dest + source;
+				match dir {
+					BinOpDirection::ToReg => {
+						self.write_register(register, new_data);
+						println!("ADD {addr_mode},{register} = {new_data}");
+					},
+					BinOpDirection::ToEA => {
+						self.write_with_mode(bus, addr_mode, new_data, true);
+						println!("ADD {register},{addr_mode} = {new_data}");
+					}
+				};
+				self.handle_add_flags(dest, source, new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+			},
+			Opcode::AddA { dest, size, source } => {
+				let register = Register::from_areg(dest);
+				let ea_data = self.read_with_mode(bus, source, size, true).sign_extend();
+				let reg_data = self.read_register(register, Size::Long);
+				let new_data = reg_data + ea_data;
+				self.write_register(register, new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				println!("ADDA {source},{dest} = {new_data}");
 			},
 			Opcode::LsdToD { rot, dir, size, mode, reg } => {
 				let rotation = match mode {
@@ -825,16 +963,16 @@ impl CPU {
 					},
 				};
 				self.set_v(false);
-				self.write_register(new_data, register);
-				let instr_cycles = calc_opcode_cycles(opcode, None, None, None, Some(rotation as u64));
-				self.countdown += instr_cycles;
+				self.write_register(register, new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, Some(rotation as u64));
 				println!("LS{dir} {mode}{rot},{reg}");
 			},
 			_ => panic!("{opcode} unimplemented."),
 		}
-		if self.countdown == 0 {
+		if cycles == 0 {
 			panic!("{opcode} failed to advance cycles.");
 		}
+		self.countdown += cycles;
 	}
 	
 	#[bitmatch]
@@ -1194,14 +1332,14 @@ impl CPU {
 			// BSR
 			"0110_0001_dddd_dddd" => {
 				Opcode::Bsr {
-					disp: CPU::sign_extend_u16(d)
+					disp: CPU::sign_extend_u8(d as u8)
 				}
 			}
 			// Bcc
 			"0110_cccc_dddd_dddd" => {
 				Opcode::Bcc {
 					cond: Condition::new(c),
-					disp: CPU::sign_extend_u16(d)
+					disp: CPU::sign_extend_u8(d as u8)
 				}
 			},
 			// MOVEQ
@@ -1251,13 +1389,12 @@ impl CPU {
 					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
 				}
 			},
-			// SUB
-			"1001_dddr_ssmm_mxxx" => {
-				Opcode::Sub {
-					reg: DReg::new(d),
-					dir: BinOpDirection::new(r == 1),
-					size: Size::from_low_bits(s),
-					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
+			// SUBA
+			"1001_aaas_11mm_mxxx" => {
+				Opcode::SubA {
+					dest: AReg::new(a),
+					size: Size::from_bit(s == 1),
+					source: self.decode_addressing_mode(((m << 3) + x) as u8),
 				}
 			},
 			// SUBX
@@ -1278,12 +1415,13 @@ impl CPU {
 					},
 				}
 			},
-			// SUBA
-			"1001_aaas_11mm_mxxx" => {
-				Opcode::SubA {
-					dest: AReg::new(a),
-					size: Size::from_bit(s == 1),
-					source: self.decode_addressing_mode(((m << 3) + x) as u8),
+			// SUB
+			"1001_dddr_ssmm_mxxx" => {
+				Opcode::Sub {
+					reg: DReg::new(d),
+					dir: BinOpDirection::new(r == 1),
+					size: Size::from_low_bits(s),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
 				}
 			},
 			// EOR
@@ -1365,13 +1503,12 @@ impl CPU {
 					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
 				}
 			},
-			// ADD
-			"1101_dddr_ssmm_mxxx" => {
-				Opcode::Add {
-					reg: DReg::new(d),
-					dir: BinOpDirection::new(r == 1),
-					size: Size::from_low_bits(s),
-					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
+			// ADDA
+			"1101_aaas_11mm_mxxx" => {
+				Opcode::AddA {
+					dest: AReg::new(a),
+					size: Size::from_bit(s == 1),
+					source: self.decode_addressing_mode(((m << 3) + x) as u8),
 				}
 			},
 			// ADDX
@@ -1392,12 +1529,13 @@ impl CPU {
 					},
 				}
 			},
-			// ADDA
-			"1101_aaas_11mm_mxxx" => {
-				Opcode::AddA {
-					dest: AReg::new(a),
-					size: Size::from_bit(s == 1),
-					source: self.decode_addressing_mode(((m << 3) + x) as u8),
+			// ADD
+			"1101_dddr_ssmm_mxxx" => {
+				Opcode::Add {
+					reg: DReg::new(d),
+					dir: BinOpDirection::new(r == 1),
+					size: Size::from_low_bits(s),
+					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
 				}
 			},
 			// ASd
