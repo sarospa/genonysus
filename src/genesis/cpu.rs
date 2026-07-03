@@ -282,10 +282,13 @@ impl CPU {
 				let extension_word = bus.read_u16(self.program_counter);
 				let index: i32 = CPU::sign_extend_u8((extension_word & 0xFF) as u8);
 				let address = self.read_register_u32(Register::new(reg, true));
-				let mode = (index & 0x8000) >> 15;
-				let reg_2 = (index & 0x7000) >> 12;
-				let size = if ((index & 0x0800) >> 11) == 1 { Size::Long } else { Size::Word };
+				let mode = (extension_word & 0x8000) >> 15;
+				let reg_2 = (extension_word & 0x7000) >> 12;
+				let size = if ((extension_word & 0x0800) >> 11) == 1 { Size::Long } else { Size::Word };
 				let reg_data = self.read_register(Register::new(reg_2 as usize, mode == 1), size).sign_extend();
+				if advance {
+					self.program_counter += 2;
+				};
 				match reg_data {
 					Data::Long(d) => address.wrapping_add_signed(index).wrapping_add(d),
 					_ => panic!("Invalid size in Address With Index"),
