@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 bit_reverse = "0.1.8"
 bitmatch = "0.1.1"
+
+[features]
+trace = []

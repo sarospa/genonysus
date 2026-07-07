@@ -20,10 +20,14 @@ pub struct CPU {
 	ssp: u32,
 	cycles: u64,
 	countdown: u64,
+	interrupt_vectors: [u32; 8],
+	interrupt_level: u16,
+	interrupt_set: bool,
+	suppress_output: bool,
 }
 
 impl CPU {
-	pub fn new(bus: &dyn Motorola68KBus) -> CPU {	
+	pub fn new(bus: &mut dyn Motorola68KBus) -> CPU {
 		CPU {
 			program_counter: bus.read_u32(4),
 			status_register: 0,
@@ -33,18 +37,40 @@ impl CPU {
 			ssp: bus.read_u32(0),
 			cycles: 0,
 			countdown: 0,
+			interrupt_vectors: [bus.read_u32(0x60), bus.read_u32(0x64), bus.read_u32(0x68), bus.read_u32(0x6C),
+				bus.read_u32(0x70), bus.read_u32(0x74), bus.read_u32(0x78), bus.read_u32(0x7C)],
+			interrupt_level: 0,
+			interrupt_set: false,
+			suppress_output: true,
 		}
 	}
 	
 	pub fn advance_cycle(&mut self, bus: &mut dyn Motorola68KBus) {
 		if self.countdown == 0 {
-			self.run_opcode(bus);
+			if self.interrupt_set {
+				let mask = self.get_i();
+				if mask < self.interrupt_level || self.interrupt_level == 7 {
+					self.push(bus, Data::Long(self.program_counter));
+					self.push(bus, Data::Word(self.status_register));
+					self.set_i(6);
+					self.interrupt_set = false;
+					self.program_counter = self.interrupt_vectors[self.interrupt_level as usize];
+					self.countdown += 72;
+					self.cycles += 72;
+				}
+				else {
+					self.run_opcode(bus);
+				}
+			}
+			else {
+				self.run_opcode(bus);
+			}
 		}
 		self.countdown -= 1;
 		self.cycles += 1;
 	}
 	
-	fn read(bus: &dyn Motorola68KBus, address: u32, size: Size) -> Data {
+	fn read(bus: &mut dyn Motorola68KBus, address: u32, size: Size) -> Data {
 		match size {
 			Size::Byte => Data::Byte(bus.read_u8(address)),
 			Size::Word => Data::Word(bus.read_u16(address)),
@@ -146,6 +172,24 @@ impl CPU {
 	fn pop(&mut self, bus: &mut dyn Motorola68KBus, size: Size) -> Data {
 		self.read_with_mode(bus, AddrMode::AddressWithPostinc(7), size, true)
 	}
+
+	fn pop_u16(&mut self, bus: &mut dyn Motorola68KBus) -> u16 {
+		if let Data::Word(data) =  self.pop(bus, Size::Word) {
+			data
+		}
+		else {
+			panic!("Incorrect size in pop u16");
+		}
+	}
+
+	fn pop_u32(&mut self, bus: &mut dyn Motorola68KBus) -> u32 {
+		if let Data::Long(data) =  self.pop(bus, Size::Long) {
+			data
+		}
+		else {
+			panic!("Incorrect size in pop u16");
+		}
+	}
 	
 	fn decode_addressing_mode(&self, addressing_bits: u8) -> AddrMode {
 		let reg_bits = (addressing_bits & 0b111) as usize;
@@ -167,7 +211,7 @@ impl CPU {
 	}
 	
 	// Assumes the program counter has advanced to the extension word, and advances it past it if applicable.
-	fn read_with_mode(&mut self, bus: &dyn Motorola68KBus, addr_mode: AddrMode, size: Size, advance: bool) -> Data {
+	fn read_with_mode(&mut self, bus: &mut dyn Motorola68KBus, addr_mode: AddrMode, size: Size, advance: bool) -> Data {
 		match addr_mode {
 			AddrMode::Address(_) | AddrMode::AddressWithPostinc(_) | AddrMode::AddressWithPredec(_)
 			| AddrMode::AddressWithDisp(_) | AddrMode::AddressWithIndex(_)
@@ -189,14 +233,14 @@ impl CPU {
 					Size::Long => CPU::read(bus, self.program_counter, Size::Long),
 				};
 				if advance {
-					self.program_counter += Ord::max(size.length(), 2);
+					self.program_counter += Ord::max(size.width(), 2);
 				};
 				data
 			},
 		}
 	}
 	
-	fn read_with_mode_u8(&mut self, bus: &dyn Motorola68KBus, addr_mode: AddrMode, advance: bool) -> u8 {
+	fn read_with_mode_u8(&mut self, bus: &mut dyn Motorola68KBus, addr_mode: AddrMode, advance: bool) -> u8 {
 		let Data::Byte(data) = self.read_with_mode(bus, addr_mode, Size::Byte, advance)
 		else {
 			panic!("read_with_mode_u8 returned a non-byte value.");
@@ -204,7 +248,7 @@ impl CPU {
 		return data;
 	}
 	
-	fn read_with_mode_u16(&mut self, bus: &dyn Motorola68KBus, addr_mode: AddrMode, advance: bool) -> u16 {
+	fn read_with_mode_u16(&mut self, bus: &mut dyn Motorola68KBus, addr_mode: AddrMode, advance: bool) -> u16 {
 		let Data::Word(data) = self.read_with_mode(bus, addr_mode, Size::Word, advance)
 		else {
 			panic!("read_with_mode_u16 returned a non-word value.");
@@ -212,7 +256,7 @@ impl CPU {
 		return data;
 	}
 	
-	fn read_with_mode_u32(&mut self, bus: &dyn Motorola68KBus, addr_mode: AddrMode, advance: bool) -> u32 {
+	fn read_with_mode_u32(&mut self, bus: &mut dyn Motorola68KBus, addr_mode: AddrMode, advance: bool) -> u32 {
 		let Data::Long(data) = self.read_with_mode(bus, addr_mode, Size::Long, advance)
 		else {
 			panic!("read_with_mode_u32 returned a non-long value.");
@@ -239,7 +283,7 @@ impl CPU {
 		}
 	}
 	
-	fn calc_addr(&mut self, bus: &dyn Motorola68KBus, addr_mode: AddrMode, size: Size, advance: bool) -> u32 {
+	fn calc_addr(&mut self, bus: &mut dyn Motorola68KBus, addr_mode: AddrMode, size: Size, advance: bool) -> u32 {
 		let address = match addr_mode {
 			AddrMode::Address(reg) => {
 				self.read_register_u32(Register::new(reg, true))
@@ -252,7 +296,7 @@ impl CPU {
 					if reg == 7 && size == Size::Byte {
 						self.write_register(register, Data::Long(address.wrapping_add(2)))
 					} else {
-						self.write_register(register, Data::Long(address.wrapping_add(size.length())));
+						self.write_register(register, Data::Long(address.wrapping_add(size.width())));
 					}
 				}
 				address
@@ -265,10 +309,10 @@ impl CPU {
 					if reg == 7 && size == Size::Byte {
 						self.write_register(register, Data::Long(address.wrapping_sub(2)))
 					} else {
-						self.write_register(register, Data::Long(address.wrapping_sub(size.length())));
+						self.write_register(register, Data::Long(address.wrapping_sub(size.width())));
 					};
 				};
-				address.wrapping_sub(size.length())
+				address.wrapping_sub(size.width())
 			},
 			AddrMode::AddressWithDisp(reg) => {
 				let disp: i32 = CPU::sign_extend_u16(bus.read_u16(self.program_counter));
@@ -390,7 +434,11 @@ impl CPU {
 		let i = (val as u16) << 8;
 		self.status_register = (self.status_register & 0b1111100011111111) | i;
 	}
-	
+
+	fn get_i(&self) -> u16 {
+		(self.status_register & 0b0000011100000000) >> 8
+	}
+
 	fn get_ccr_flags(&self) -> Flags {
 		Flags {
 			x: self.status_register & 0b0000000000010000 == 0b00010000,
@@ -433,6 +481,7 @@ impl CPU {
 	
 	#[bitmatch]
 	pub fn run_opcode(&mut self, bus: &mut dyn Motorola68KBus) -> () {
+		#[cfg(feature = "trace")]
 		print!("{:#010X} {:#010} ", self.program_counter, self.cycles);
 		let opcode = self.decode_opcode(bus);
 		self.program_counter += 2;
@@ -445,6 +494,7 @@ impl CPU {
 				self.handle_result_flags(data);
 				self.write_with_mode(bus, addr_mode, data, true);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
 				println!("ORI {},{} = {}", imm, addr_mode, data);
 			},
 			Opcode::AndI { size, addr_mode } => {
@@ -454,6 +504,7 @@ impl CPU {
 				self.handle_result_flags(data);
 				self.write_with_mode(bus, addr_mode, data, true);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
 				println!("ANDI #{imm},{addr_mode} = {data}");
 			},
 			Opcode::SubI { size, addr_mode } => {
@@ -463,6 +514,7 @@ impl CPU {
 				self.handle_sub_flags(data, imm, new_data);
 				self.write_with_mode(bus, addr_mode, new_data, true);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
 				println!("SUBI #{imm},{addr_mode} = {new_data}");
 			},
 			Opcode::AddI { size, addr_mode } => {
@@ -472,6 +524,7 @@ impl CPU {
 				self.handle_add_flags(data, imm, new_data);
 				self.write_with_mode(bus, addr_mode, new_data, true);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
 				println!("ADDI #{imm},{addr_mode} = {new_data}");
 			},
 			Opcode::EorI { size, addr_mode } => {
@@ -481,6 +534,7 @@ impl CPU {
 				self.handle_result_flags(data);
 				self.write_with_mode(bus, addr_mode, data, true);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
 				println!("EORI {},{} = {}", imm, addr_mode, data);
 			},
 			Opcode::CmpI { size, addr_mode } => {
@@ -489,6 +543,7 @@ impl CPU {
 				let new_data = data - imm;
 				self.handle_compare_flags(data, imm, new_data);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
 				println!("CMPI #imm,{addr_mode}");
 			},
 			Opcode::Btst { addr_mode } => {
@@ -504,12 +559,14 @@ impl CPU {
 					_ => panic!("Incorrect data sizes in BTST"),
 				};
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
 				println!("BTST #{bit_select},{addr_mode}");
 			}
 			Opcode::MoveA { size, dest, source } => {
 				let data = self.read_with_mode(bus, source, size, true);
 				self.write_register(Register::from_areg(dest), data.sign_extend());
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
 				println!("MOVEA {},A{} = {}", source, dest.get(), data);
 			},
 			Opcode::Move { size, dest, source } => {
@@ -517,13 +574,21 @@ impl CPU {
 				self.handle_result_flags(data);
 				self.write_with_mode(bus, dest, data, true);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
 				println!("MOVE {},{} = {}", source, dest, data);
 			},
 			Opcode::MoveToSr { addr_mode } => {
 				self.status_register = self.read_with_mode_u16(bus, addr_mode, true);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, Size::Word);
+				#[cfg(feature = "trace")]
 				println!("MOVE {},SR = {:#06X}", addr_mode, self.status_register);
 			},
+			Opcode::MoveFromSr { addr_mode } => {
+				self.write_with_mode(bus, addr_mode, Data::Word(self.status_register), true);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, Size::Word);
+				#[cfg(feature = "trace")]
+				println!("MOVE SR,{} = {:#06X}", addr_mode, self.status_register);
+			}
 			Opcode::Clr { size, addr_mode } => {
 				// CLR generates a read before writing to the effective address
 				let _ = self.read_with_mode(bus, addr_mode, size, false);
@@ -538,7 +603,25 @@ impl CPU {
 				self.set_c(false);
 				self.write_with_mode(bus, addr_mode, data, true);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
 				println!("CLR {}", addr_mode);
+			},
+			Opcode::Ext { size, dest } => {
+				let register = Register::from_dreg(dest);
+				let data = match size {
+					Size::Word => {
+						Data::Word(((self.read_register_u8(register) as i8) as i16) as u16)
+					},
+					Size::Long => {
+						self.read_register(register, Size::Word).sign_extend()
+					},
+					_ => panic!("Incorrect size in EXT"),
+				};
+				self.handle_result_flags(data);
+				self.write_register(register, data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
+				println!("CLR {dest}");
 			},
 			Opcode::Swap { dest } => {
 				let register = Register::from_dreg(dest);
@@ -547,12 +630,14 @@ impl CPU {
 				self.handle_result_flags(new_data);
 				self.write_register(register, new_data);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
 				println!("SWAP {register} = {new_data}");
 			},
 			Opcode::Pea { addr_mode } => {
 				let address = self.calc_addr(bus, addr_mode, Size::Long, true);
 				self.push(bus, Data::Long(address));
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
 				println!("PEA {}", addr_mode);
 			}
 			Opcode::Tst { size, addr_mode } => {
@@ -564,28 +649,68 @@ impl CPU {
 				};
 				self.handle_compare_flags(data, zero, data);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
 				println!("TST {} = CCR {:#04X}", addr_mode, self.status_register);
 			},
+			Opcode::Link { frame_pointer } => {
+				let register = Register::from_areg(frame_pointer);
+				let data = self.read_register(register, Size::Long);
+				self.push(bus, data);
+				let stack_register = Register::new(7, true);
+				let stack_pointer = Data::Long(self.read_register_u32(stack_register));
+				self.write_register(register, stack_pointer);
+				let disp = self.read_with_mode(bus, AddrMode::Immediate, Size::Word, true).sign_extend();
+				self.write_register(stack_register, stack_pointer + disp);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
+				println!("LINK {frame_pointer}");
+			},
+			Opcode::Unlnk { frame_pointer } => {
+				let register = Register::from_areg(frame_pointer);
+				let stack_pointer = self.read_register(register, Size::Long);
+				let stack_register = Register::new(7, true);
+				self.write_register(stack_register, stack_pointer);
+				let data = self.pop(bus, Size::Long);
+				self.write_register(register, data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
+				println!("UNLNK {frame_pointer}");
+			}
 			Opcode::MoveUsp { dir, a } => {
 				match dir {
 					MoveDirection::RegToMem => {
 						let data = self.read_register_u32(Register::from_areg(a));
 						self.usp = data;
+						#[cfg(feature = "trace")]
 						println!("MOVE {},USP", a);
 					}
 					MoveDirection::MemToReg => {
 						self.write_register(Register::from_areg(a), Data::Long(self.usp));
+						#[cfg(feature = "trace")]
 						println!("MOVE USP,{}", a);
 					}
 				};
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
 			},
+			Opcode::Nop => {
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
+				println!("NOP");
+			}
 			Opcode::Not { size, addr_mode } => {
 				let data = self.read_with_mode(bus, addr_mode, size, false) ^ Data::max(size);
 				self.handle_result_flags(data);
 				self.write_with_mode(bus, addr_mode, data, true);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
 				println!("NOT {addr_mode} = {data}");
+			}
+			Opcode::Rte => {
+				self.status_register = self.pop_u16(bus);
+				self.program_counter = self.pop_u32(bus);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
+				println!("RTE");
 			}
 			Opcode::Rts => {
 				let pc = self.pop(bus, Size::Long);
@@ -594,6 +719,7 @@ impl CPU {
 					_ => panic!("Incorrect data size in RTS"),
 				};
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
 				println!("RTS");
 			}
 			Opcode::Jsr { addr_mode } => {
@@ -601,11 +727,13 @@ impl CPU {
 				self.push(bus, Data::Long(self.program_counter));
 				self.program_counter = jump_pc;
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
 				println!("JSR {}", addr_mode);
 			},
 			Opcode::Jmp { addr_mode } => {
 				self.program_counter = self.calc_addr(bus, addr_mode, Size::Long, true);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
 				println!("JMP {}", addr_mode);
 			},
 			Opcode::MoveM { dir, size, addr_mode } => {
@@ -656,25 +784,50 @@ impl CPU {
 					}
 				};
 				let mut reg_count = 0;
+				// MOVEM has a special case handling of address modes
+				// If it's predec or postinc, it advances on each write or read as normal
+				// If it's anything else, it calculates the address, and then increments it
+				// for each register in order to read/write all of them in a line of memory.
+				// This sucks.
+				let mut address = match addr_mode {
+					AddrMode::AddressWithPredec(_)
+						| AddrMode::AddressWithPostinc(_) => None,
+					_ => Some(self.calc_addr(bus, addr_mode, size, true)),
+				};
 				match dir {
 					MoveDirection::RegToMem => {
 						for i in (0..16).rev() {
 							if reg_flags[i] {
 								let data = self.read_register(reg_list[i], size);
-								self.write_with_mode(bus, addr_mode, data, true);
+								if let AddrMode::AddressWithPredec(_) = addr_mode {
+									self.write_with_mode(bus, addr_mode, data, true);
+								}
+								else {
+									CPU::write(bus, address.unwrap(), data);
+									address = Some(address.unwrap() + size.width());
+								}
 								reg_count += 1;
 							}
 						};
+						#[cfg(feature = "trace")]
 						println!("MOVEM {:#06X},{}", reg_bits, addr_mode);
 					},
 					MoveDirection::MemToReg => {
 						for i in (0..16).rev() {
 							if reg_flags[i] {
-								let data = self.read_with_mode(bus, addr_mode, size, true);
+								let data = if let AddrMode::AddressWithPostinc(_) = addr_mode {
+									self.read_with_mode(bus, addr_mode, size, true)
+								}
+								else {
+									let d = CPU::read(bus, address.unwrap(), size);
+									address = Some(address.unwrap() + size.width());
+									d
+								};
 								self.write_register(reg_list[i], data);
 								reg_count += 1;
 							}
 						};
+						#[cfg(feature = "trace")]
 						println!("MOVEM {},{:#06X}", addr_mode, reg_bits);
 					}
 				};
@@ -684,6 +837,7 @@ impl CPU {
 				let address = self.calc_addr(bus, addr_mode, Size::Long, true);
 				self.write_register(Register::new(dest.get(), true), Data::Long(address));
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
 				println!("LEA {},A{} = {:#010X}", addr_mode, dest.get(), address);
 			},
 			Opcode::AddQ { data, size, addr_mode } => {
@@ -704,6 +858,7 @@ impl CPU {
 				};
 				self.write_with_mode(bus, addr_mode, new_value, true);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
 				println!("ADDQ #{data},{addr_mode}");
 			},
 			Opcode::SubQ { data, size, addr_mode } => {
@@ -724,6 +879,7 @@ impl CPU {
 				};
 				self.write_with_mode(bus, addr_mode, new_value, true);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
 				println!("SUBQ #{data},{addr_mode}");
 			}
 			Opcode::DBcc { cond, loop_down } => {
@@ -745,6 +901,7 @@ impl CPU {
 					self.program_counter += 2;
 				}
 				cycles += calc_opcode_cycles(opcode, Some(branch_taken), Some(loop_count == 0xFFFF), None, None);
+				#[cfg(feature = "trace")]
 				println!("DB{cond},{loop_down} = PC {:#010X}, {loop_down} = {loop_count:#06X}", self.program_counter);
 			},
 			Opcode::Bsr { disp } => {
@@ -758,6 +915,7 @@ impl CPU {
 				self.push(bus, Data::Long(return_address));
 				self.program_counter = self.program_counter.wrapping_add_signed(displacement);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
 				println!("BSR = PC {:#010X}", self.program_counter);
 			}
 			Opcode::Bcc { cond, disp } => {
@@ -777,7 +935,14 @@ impl CPU {
 					self.program_counter += 2;
 				}
 				cycles += calc_opcode_cycles(opcode, Some(branch_taken), None, None, None);
-				println!("B{cond} = PC {:#010X}", self.program_counter);
+				if cond == Condition::True {
+					#[cfg(feature = "trace")]
+					println!("BRA = PC {:#010X}", self.program_counter);
+				}
+				else {
+					#[cfg(feature = "trace")]
+					println!("B{cond} = PC {:#010X}", self.program_counter);
+				}
 			},
 			Opcode::MoveQ { dest, data } => {
 				self.set_n((data & 0x80) == 0x80);
@@ -787,7 +952,35 @@ impl CPU {
 				self.write_register(Register::from_dreg(dest), Data::Long(CPU::sign_extend_u8(data) as u32));
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
 				let d = dest.get();
+				#[cfg(feature = "trace")]
 				println!("MOVEQ = D{} {:#010X}", d, self.d[d]);
+			},
+			Opcode::DivU { dest, source } => {
+				let register = Register::from_dreg(dest);
+				let dest_data = self.read_register_u32(register);
+				let source_data = self.read_with_mode_u16(bus, source, true) as u32;
+				if source_data == 0 {
+					panic!("Divide by zero exception unimplemented.");
+				}
+				if (dest_data >> 16) > source_data {
+					self.set_v(true);
+					#[cfg(feature = "trace")]
+					println!("DIVU {source},{dest} = Overflow");
+				}
+				else {
+					self.set_v(false);
+					let quotient = dest_data / source_data;
+					let remainder = dest_data % source_data;
+					self.set_n((quotient & 0x8000) == 0x8000);
+					self.set_z(quotient == 0);
+					let new_data = Data::Long(quotient + (remainder << 16));
+					self.write_register(register, new_data);
+					#[cfg(feature = "trace")]
+					println!("DIVU {source},{dest} = {new_data}");
+				}
+				let cycle_args = ((dest_data as u64) << 32) + (source_data as u64);
+				cycles += calc_opcode_cycles(opcode, None, None, Some(cycle_args), None)
+					+ self.calc_addr_cycles(source, Size::Word);
 			},
 			Opcode::Or { reg, dir, size, addr_mode } => {
 				let register = Register::from_dreg(reg);
@@ -797,10 +990,12 @@ impl CPU {
 				match dir {
 					BinOpDirection::ToEA => {
 						self.write_with_mode(bus, addr_mode, new_data, true);
+						#[cfg(feature = "trace")]
 						println!("OR {reg},{addr_mode} = {new_data}");
 					},
 					BinOpDirection::ToReg => {
 						self.write_register(register, new_data);
+						#[cfg(feature = "trace")]
 						println!("OR {addr_mode},{reg} = {new_data}");
 					},
 				};
@@ -823,10 +1018,12 @@ impl CPU {
 				match dir {
 					BinOpDirection::ToReg => {
 						self.write_register(register, new_data);
+						#[cfg(feature = "trace")]
 						println!("SUB {addr_mode},{register} = {new_data}");
 					},
 					BinOpDirection::ToEA => {
 						self.write_with_mode(bus, addr_mode, new_data, true);
+						#[cfg(feature = "trace")]
 						println!("SUB {register},{addr_mode} = {new_data}");
 					}
 				};
@@ -840,7 +1037,26 @@ impl CPU {
 				let new_data = reg_data - ea_data;
 				self.write_register(register, new_data);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
 				println!("SUBA {source},{dest} = {new_data}");
+			},
+			Opcode::Cmp { dest, size, source } => {
+				let source_data = self.read_with_mode(bus, source, size, true);
+				let dest_data = self.read_register(Register::from_dreg(dest), size);
+				let new_data = dest_data - source_data;
+				self.handle_compare_flags(dest_data, source_data, new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(source, size);
+				#[cfg(feature = "trace")]
+				println!("CMP {source},{dest}");
+			},
+			Opcode::CmpA { dest, size, source } => {
+				let source_data = self.read_with_mode(bus, source, size, true).sign_extend();
+				let dest_data = self.read_register(Register::from_areg(dest), size).sign_extend();
+				let new_data = dest_data - source_data;
+				self.handle_compare_flags(dest_data, source_data, new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(source, size);
+				#[cfg(feature = "trace")]
+				println!("CMPA {source},{dest}");
 			},
 			Opcode::MulU { dest, source } => {
 				let register = Register::from_dreg(dest);
@@ -853,6 +1069,7 @@ impl CPU {
 				}
 				self.write_register(register, Data::Long(new_data));
 				cycles += calc_opcode_cycles(opcode, None, None, Some(calc_count as u64), None);
+				#[cfg(feature = "trace")]
 				println!("MULU {source},{dest} = {new_data:#010X}");
 			}
 			Opcode::And { reg, dir, size, addr_mode } => {
@@ -863,10 +1080,12 @@ impl CPU {
 				match dir {
 					BinOpDirection::ToEA => {
 						self.write_with_mode(bus, addr_mode, new_data, true);
+						#[cfg(feature = "trace")]
 						println!("AND {reg},{addr_mode} = {new_data}");
 					},
 					BinOpDirection::ToReg => {
 						self.write_register(register, new_data);
+						#[cfg(feature = "trace")]
 						println!("AND {addr_mode},{reg} = {new_data}");
 					},
 				};
@@ -885,16 +1104,29 @@ impl CPU {
 				match dir {
 					BinOpDirection::ToReg => {
 						self.write_register(register, new_data);
+						#[cfg(feature = "trace")]
 						println!("ADD {addr_mode},{register} = {new_data}");
 					},
 					BinOpDirection::ToEA => {
 						self.write_with_mode(bus, addr_mode, new_data, true);
+						#[cfg(feature = "trace")]
 						println!("ADD {register},{addr_mode} = {new_data}");
 					}
 				};
 				self.handle_add_flags(dest, source, new_data);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
 			},
+			Opcode::AddX { dest, size, source } => {
+				let dest_data = self.read_with_mode(bus, dest, size, false);
+				let source_data = self.read_with_mode(bus, dest, size, true);
+				let x = if self.get_ccr_flags().x { Data::from_size(size, 1) } else { Data::from_size(size, 0) };
+				let new_data = dest_data + source_data + x;
+				self.write_with_mode(bus, dest, new_data, true);
+				self.handle_add_flags(dest_data, source_data, new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(source, size);
+				#[cfg(feature = "trace")]
+				println!("ADDX {source},{dest} = {new_data}");
+			}
 			Opcode::AddA { dest, size, source } => {
 				let register = Register::from_areg(dest);
 				let ea_data = self.read_with_mode(bus, source, size, true).sign_extend();
@@ -902,6 +1134,7 @@ impl CPU {
 				let new_data = reg_data + ea_data;
 				self.write_register(register, new_data);
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
+				#[cfg(feature = "trace")]
 				println!("ADDA {source},{dest} = {new_data}");
 			},
 			Opcode::LsdToD { rot, dir, size, mode, reg } => {
@@ -946,29 +1179,115 @@ impl CPU {
 					self.set_c(false);
 				}
 				let new_data = match size {
-					Size::Byte => {
-						let new_val = wide_data as u8;
-						self.set_z(new_val == 0);
-						self.set_n((new_val & 0x80) == 0x80);
-						Data::Byte(new_val)
-					},
-					Size::Word => {
-						let new_val = wide_data as u16;
-						self.set_z(new_val == 0);
-						self.set_n((new_val & 0x8000) == 0x8000);
-						Data::Word(new_val)
-					},
-					Size::Long => {
-						let new_val = wide_data as u32;
-						self.set_z(new_val == 0);
-						self.set_n((new_val & 0x80000000) == 0x80000000);
-						Data::Long(new_val)
-					},
+					Size::Byte => Data::Byte(wide_data as u8),
+					Size::Word => Data::Word(wide_data as u16),
+					Size::Long => Data::Long(wide_data as u32),
 				};
+				self.set_z(new_data.is_zero());
+				self.set_n(new_data.is_negative());
 				self.set_v(false);
 				self.write_register(register, new_data);
 				cycles += calc_opcode_cycles(opcode, None, None, None, Some(rotation as u64));
+				#[cfg(feature = "trace")]
 				println!("LS{dir} {mode}{rot},{reg}");
+			},
+			Opcode::RoXdToD { rot, dir, size, mode, reg } => {
+				let rotation = match mode {
+					RotateMode::Immediate => if rot == 0 { 8 } else { rot },
+					RotateMode::Register => self.read_register_u8(Register::new(rot as usize, false)) % 64,
+				};
+				let register = Register::from_dreg(reg);
+				let data = self.read_register(register, size);
+				// Rust REALLY does not like shifting past the size of the integer.
+				// I don't love handling this way but since the shift is limited to 63 bits,
+				// it's probably easiest to just temporarily cast to a u64.
+				let mut wide_data = match data {
+					Data::Byte(d) => d as u64,
+					Data::Word(d) => d as u64,
+					Data::Long(d) => d as u64,
+				};
+				let x = if self.get_ccr_flags().x { 1 } else { 0 };
+				if rotation > 0 {
+					match dir {
+						RotateDirection::Right => {
+							let extension_bit = (wide_data >> (rotation - 1)) & 0x1 == 0x1;
+							wide_data = (wide_data >> rotation)
+								+ (wide_data << ((size.width() * 8 + 1) - (rotation as u32)))
+								+ (x << ((size.width() * 8 + 1) - (rotation as u32)));
+							self.set_c(extension_bit);
+							self.set_x(extension_bit);
+						},
+						RotateDirection::Left => {
+							let extension_bit = (wide_data >> (size.width() * 8 - (rotation as u32))) & 0x1 == 0x1;
+							wide_data = (wide_data << rotation)
+								+ (wide_data >> ((size.width() * 8 + 1) - (rotation as u32)))
+								+ (x >> ((size.width() * 8 + 1) - (rotation as u32)));
+							let carry_bit = (wide_data & 0x1) == 0x1;
+							self.set_c(extension_bit);
+							self.set_x(extension_bit);
+						}
+					}
+				}
+				else {
+					self.set_c(self.get_ccr_flags().x);
+				}
+				let new_data = match size {
+					Size::Byte => Data::Byte(wide_data as u8),
+					Size::Word => Data::Word(wide_data as u16),
+					Size::Long => Data::Long(wide_data as u32),
+				};
+				self.set_z(new_data.is_zero());
+				self.set_n(new_data.is_negative());
+				self.set_v(false);
+				self.write_register(register, new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, Some(rotation as u64));
+				#[cfg(feature = "trace")]
+				println!("ROX{dir} {mode}{rot},{reg}");
+			},
+			Opcode::RodToD { rot, dir, size, mode, reg } => {
+				let rotation = match mode {
+					RotateMode::Immediate => if rot == 0 { 8 } else { rot },
+					RotateMode::Register => self.read_register_u8(Register::new(rot as usize, false)) % 64,
+				};
+				let register = Register::from_dreg(reg);
+				let data = self.read_register(register, size);
+				// Rust REALLY does not like shifting past the size of the integer.
+				// I don't love handling this way but since the shift is limited to 63 bits,
+				// it's probably easiest to just temporarily cast to a u64.
+				let mut wide_data = match data {
+					Data::Byte(d) => d as u64,
+					Data::Word(d) => d as u64,
+					Data::Long(d) => d as u64,
+				};
+				if rotation > 0 {
+					match dir {
+						RotateDirection::Right => {
+							wide_data = (wide_data >> rotation) + (wide_data << ((size.width() * 8) - (rotation as u32)));
+							let carry_bit = ((wide_data >> ((size.width() * 8) - 1)) & 0x1) == 0x1;
+							self.set_c(carry_bit);
+						},
+						RotateDirection::Left => {
+							wide_data = (wide_data << rotation) + (wide_data >> ((size.width() * 8) - (rotation as u32)));
+							let carry_bit = (wide_data & 0x1) == 0x1;
+							self.set_c(carry_bit);
+						}
+					}
+				}
+				else {
+					self.set_c(false);
+				}
+				let new_data = match size {
+					Size::Byte => Data::Byte(wide_data as u8),
+					Size::Word => Data::Word(wide_data as u16),
+					Size::Long => Data::Long(wide_data as u32),
+				};
+				self.set_z(new_data.is_zero());
+				self.set_n(new_data.is_negative());
+				self.set_v(false);
+				self.write_register(register, new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, Some(rotation as u64));
+				#[cfg(feature = "trace")]
+				println!("RO{dir} {mode}{rot},{reg}");
 			},
 			_ => panic!("{opcode} unimplemented."),
 		}
@@ -977,10 +1296,16 @@ impl CPU {
 		}
 		self.countdown += cycles;
 	}
+
+	pub fn assert_interrupt(&mut self, level: u16) {
+		self.interrupt_level = level;
+		self.interrupt_set = true;
+	}
 	
 	#[bitmatch]
-	fn decode_opcode(&self, bus: &dyn Motorola68KBus) -> Opcode {
+	fn decode_opcode(&self, bus: &mut dyn Motorola68KBus) -> Opcode {
 		let opcode = bus.read_u16(self.program_counter);
+		#[cfg(feature = "trace")]
 		print!("{:#06X} ", opcode);
 		#[bitmatch]
 		match opcode {
@@ -1427,6 +1752,14 @@ impl CPU {
 					addr_mode: self.decode_addressing_mode(((m << 3) + x) as u8),
 				}
 			},
+			// CMPA
+			"1011_aaas_11mm_mxxx" => {
+				Opcode::CmpA {
+					dest: AReg::new(a),
+					size: Size::from_bit(s == 1),
+					source: self.decode_addressing_mode(((m << 3) + x) as u8),
+				}
+			},
 			// EOR
 			"1011_ddd1_ssmm_mxxx" => {
 				Opcode::Eor {
@@ -1448,14 +1781,6 @@ impl CPU {
 				Opcode::Cmp {
 					dest: DReg::new(d),
 					size: Size::from_low_bits(s),
-					source: self.decode_addressing_mode(((m << 3) + x) as u8),
-				}
-			},
-			// CMPA
-			"1011_aaas_11mm_mxxx" => {
-				Opcode::CmpA {
-					dest: AReg::new(a),
-					size: Size::from_bit(s == 1),
 					source: self.decode_addressing_mode(((m << 3) + x) as u8),
 				}
 			},
@@ -1629,10 +1954,10 @@ impl CPU {
 	fn sign_extend_u8(x: u8) -> i32 {
 		(x as i8) as i32
 	}
-	
+
 	// Put the cpu in a clean state to start a test.
 	#[cfg(test)]
-	pub fn test_reset(&mut self, bus: &dyn Motorola68KBus) {
+	pub fn test_reset(&mut self, bus: &mut dyn Motorola68KBus) {
 		self.program_counter = bus.read_u32(4);
 		self.status_register = 0x2000;
 		self.a = [0; 7];

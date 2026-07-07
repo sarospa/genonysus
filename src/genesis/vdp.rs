@@ -2,14 +2,15 @@ use bitmatch::bitmatch;
 
 mod vdp_support;
 use vdp_support::*;
+use crate::genesis::cpu::CPU;
 
 #[derive(Debug)]
 pub struct VDP {
-	h_cycles: u8,
 	h_counter: u16,
 	h_phase: u8,
 	h_blank: bool,
-	serial_clock: u16,
+	access_slot: u16,
+	slot_ready: bool,
 	v_counter: u16,
 	v_phase: u8,
 	v_blank: bool,
@@ -19,20 +20,30 @@ pub struct VDP {
 	vscroll_ram: Vec<u8>,
 	dma_active: bool,
 	fill_active: bool,
-	queue: [u16; 4],
-	queue_index: usize,
+	queue: [FifoSlot; 4],
+	queue_end: usize,
+	queue_start: usize,
 	queue_size: u8,
 	data_command: bool,
 	regs: VDPRegisters,
+    frame: u64,
+	pub clock_speed: u8,
+	pub countdown: u8,
 }
 impl VDP {
 	pub fn new() -> VDP {
+		let empty_fifo = FifoSlot {
+			code: DataCode::VramRead,
+			address: 0,
+			data: 0,
+			half_complete: false,
+		};
 		VDP {
-			h_cycles: 0,
 			h_counter: 0,
 			h_phase: 1,
 			h_blank: false,
-			serial_clock: 0,
+			access_slot: 0,
+			slot_ready: false,
 			v_counter: 0,
 			v_phase: 1,
 			v_blank: false,
@@ -42,72 +53,62 @@ impl VDP {
 			vscroll_ram: vec!(0u8; VSRAM_SIZE),
 			dma_active: false,
 			fill_active: false,
-			queue: [0, 0, 0, 0],
-			queue_index: 0,
+			queue: [empty_fifo, empty_fifo, empty_fifo, empty_fifo],
+			queue_end: 0,
+			queue_start: 0,
 			queue_size: 0,
 			data_command: false,
-			regs: VDPRegisters::new()
+			regs: VDPRegisters::new(),
+            frame: 0,
+			clock_speed: 10,
+			countdown: 0,
 		}
 	}
-	
-	pub fn advance_master_cycle(&mut self) {
-		self.dot_counter = (self.dot_counter + 1) % 3420;
+
+	pub fn advance_cycle(&mut self, cpu: &mut CPU) {
+		self.dot_counter = self.dot_counter + (self.clock_speed as u16);
 		let mut v_advance = false;
-		let mut access_slot = false;
-		self.h_cycles += 1;
 		if self.regs.h32_mode {
-			if self.h_cycles % 5 == 0 {
-				self.serial_clock = (self.serial_clock + 1) % 684;
-				access_slot = (self.serial_clock % 4) == 0
+			self.h_counter = (self.h_counter + 1) & 0x1FF;
+			if self.h_counter == 0x128 && self.h_phase == 1 {
+				self.h_phase = 2;
+				self.h_counter = 0x1D2;
 			}
-			if self.h_cycles >= 10 {
-				self.h_counter = (self.h_counter + 1) & 0x1FF;
-				self.h_cycles = 0;
-				if self.h_counter == 0x128 && self.h_phase == 1 {
-					self.h_phase = 2;
-					self.h_counter = 0x1D2;
-				}
-				else if self.h_counter == 0x00 && self.h_phase == 2 {
-					self.h_phase = 1;
-				}
-				if self.h_counter == 0x126 { self.h_blank = true; }
-				else if self.h_counter == 0x0A { self.h_blank = false; }
-				
-				if self.h_counter == 0x10A { v_advance = true; }
+			else if self.h_counter == 0x00 && self.h_phase == 2 {
+				self.h_phase = 1;
 			}
+			if self.h_counter == 0x126 { self.h_blank = true; }
+			else if self.h_counter == 0x0A { self.h_blank = false; }
+
+			if self.h_counter == 0x10A { v_advance = true; }
 		}
 		else {
-			let cycle_count = match self.h_counter {
+			self.h_counter = (self.h_counter + 1) & 0x1FF;
+			if self.h_counter == 0x16D && self.h_phase == 1 {
+				self.h_phase = 2;
+				self.h_counter = 0x1C9 + 1;
+			}
+			else if self.h_counter == 0x00 && self.h_phase == 2 {
+				self.h_phase = 1;
+			}
+			if self.h_counter == 0x166 { self.h_blank = true; }
+			else if self.h_counter == 0x0C { self.h_blank = false; }
+
+			if self.h_counter == 0x14A { v_advance = true; }
+			self.clock_speed = match self.h_counter {
 				0x1CD..=0x1D3 | 0x1D6..=0x1DC | 0x1DE..=0x1E4 | 0x1E7..=0x1ED => 10,
 				0x1D4..=0x1D5 | 0x1E5..=0x1E6 => 9,
 				_ => 8,
 			};
-			if self.h_cycles == cycle_count / 2 || self.h_cycles == cycle_count {
-				self.serial_clock = (self.serial_clock + 1) % 840;
-				access_slot = (self.serial_clock % 4) == 0
-			}
-			if self.h_cycles >= cycle_count {
-				self.h_counter = (self.h_counter + 1) & 0x1FF;
-				self.h_cycles = 0;
-				if self.h_counter == 0x16D && self.h_phase == 1 {
-					self.h_phase = 2;
-					self.h_counter = 0x1C9 + 1;
-				}
-				else if self.h_counter == 0x00 && self.h_phase == 2 {
-					self.h_phase = 1;
-				}
-				if self.h_counter == 0x166 { self.h_blank = true; }
-				else if self.h_counter == 0x0C { self.h_blank = false; }
-				
-				if self.h_counter == 0x14A { v_advance = true; }
-			}
 		}
-		if self.dot_counter == 0 {
-			self.h_cycles = 0;
+		self.countdown = self.clock_speed;
+
+		if self.dot_counter >= 3420 {
+			self.dot_counter %= 3420;
 			self.h_counter = 0;
 			self.h_phase = 1;
-			self.serial_clock = 0;
 		}
+
 		if v_advance {
 			self.v_counter = (self.v_counter + 1) & 0x1FF;
 			if self.v_counter == 0x0EB && self.v_phase == 1 {
@@ -118,14 +119,36 @@ impl VDP {
 				self.v_phase = 1;
 				self.v_counter = 0x000;
 			}
-			if self.v_counter == 0xE0 && self.v_phase == 1 { self.v_blank = true; }
-			else if self.v_counter == 0xFF && self.v_phase == 1 { self.v_blank = false; }
+			if self.v_counter == 0xE0 && self.v_phase == 1 {
+				self.v_blank = true;
+				if self.regs.v_interrupt_enable {
+					cpu.assert_interrupt(6);
+					self.regs.v_interrupt_triggered = true;
+				}
+			}
+			else if self.v_counter == 0xFF && self.v_phase == 2 {
+				self.v_blank = false;
+				self.frame += 1;
+				println!("frame {}", self.frame);
+				self.regs.v_interrupt_triggered = false;
+			}
 		}
-		if access_slot {
+
+		if self.slot_ready {
 			self.access_vram();
+			if self.regs.h32_mode {
+				self.access_slot = (self.access_slot + 1) % 171;
+			}
+			else {
+				self.access_slot = (self.access_slot + 1) % 210;
+			}
+			self.slot_ready = false;
+		}
+		else {
+			self.slot_ready = true;
 		}
 	}
-	
+
 	pub fn get_v_counter(&self) -> u8 {
 		(self.v_counter & 0xFF) as u8
 	}
@@ -135,52 +158,90 @@ impl VDP {
 	}
 
 	fn access_vram(&mut self) {
-		let slot_number = self.serial_clock / 4;
-		let slot_type = current_vram_slot(self.regs.h32_mode, slot_number, self.v_blank);
+		let slot_type = current_vram_slot(self.regs.h32_mode, self.access_slot, self.v_blank || (!self.regs.display_enable));
 		match slot_type {
 			VramSlot::ExternalAccess => {
-				if self.regs.dma_enable && self.dma_active && self.regs.auto_increment > 0 {
-					match self.regs.dma_type {
-						DmaType::Cpu => {
-							panic!("CPU DMA unimplemented.");
-						},
-						DmaType::Fill => {
-							if self.fill_active {
-								self.vram[self.regs.data_address as usize] = self.regs.dma_fill;
-								self.regs.data_address = self.regs.data_address.wrapping_add(self.regs.auto_increment);
-								self.regs.dma_length = self.regs.dma_length.wrapping_sub(1);
-								if self.regs.dma_length == 0 {
-									self.dma_active = false;
-									self.fill_active = false;
-								}
-							}
-						},
-						DmaType::Copy => {
-							panic!("Copy DMA unimplemented.");
-						}
-					}
-				}
+                if self.queue_size == 0 {
+                    return;
+                }
+                let write = &mut self.queue[self.queue_start];
+                match write.code {
+                    DataCode::VramDma => {
+                        if self.regs.dma_enable && self.dma_active && self.regs.auto_increment > 0 {
+                            match self.regs.dma_type {
+                                DmaType::Cpu => {
+                                    panic!("CPU DMA unimplemented.");
+                                },
+                                DmaType::Fill => {
+                                    if self.fill_active {
+                                        self.vram[self.regs.data_address as usize] = (write.data & 0xFF) as u8;
+                                        self.regs.data_address = self.regs.data_address.wrapping_add(self.regs.auto_increment);
+                                        self.regs.dma_length = self.regs.dma_length.wrapping_sub(1);
+                                        if self.regs.dma_length == 0 {
+                                            self.dma_active = false;
+                                            self.fill_active = false;
+                                            self.queue_size -= 1;
+                                            self.queue_start = (self.queue_start + 1) % 4;
+                                        }
+                                    }
+                                },
+                                DmaType::Copy => {
+                                    panic!("Copy DMA unimplemented.");
+                                }
+                            }
+                        }
+                    },
+                    DataCode::VramWrite => {
+                        if !write.half_complete {
+                            let data = ((write.data & 0xFF00) >> 8) as u8;
+                            self.vram[self.regs.data_address as usize] = data;
+                            write.half_complete = true;
+                        }
+                        else {
+                            let data = (write.data & 0x00FF) as u8;
+                            self.vram[self.regs.data_address.wrapping_add(1) as usize] = data;
+                            self.queue_size -= 1;
+                            self.queue_start = (self.queue_start + 1) % 4;
+                            self.regs.data_address = self.regs.data_address.wrapping_add(self.regs.auto_increment);
+                        }
+                    },
+                    DataCode::CramWrite => {
+                        let write_lower = (write.data & 0x00FF) as u8;
+                        let write_upper = ((write.data & 0xFF00) >> 8) as u8;
+                        self.color_ram[self.regs.data_address as usize] = write_upper;
+                        self.color_ram[((self.regs.data_address + 1)) as usize % CRAM_SIZE] = write_lower;
+                        self.queue_size -= 1;
+                        self.queue_start = (self.queue_start + 1) % 4;
+                        self.regs.data_address = (self.regs.data_address + self.regs.auto_increment) % (CRAM_SIZE as u16);
+                    },
+                    DataCode::VsramWrite => {
+                        let write_lower = (write.data & 0x00FF) as u8;
+                        let write_upper = ((write.data & 0xFF00) >> 8) as u8;
+                        self.vscroll_ram[self.regs.data_address as usize] = write_upper;
+                        self.vscroll_ram[((self.regs.data_address + 1)) as usize % CRAM_SIZE] = write_lower;
+                        self.queue_size -= 1;
+                        self.queue_start = (self.queue_start + 1) % 4;
+                        self.regs.data_address = (self.regs.data_address + self.regs.auto_increment) % (VSRAM_SIZE as u16);
+                    },
+                    _ => panic!("Attempted VDP RAM write in read mode."),
+                }
 			}
 			_ => ()
 		}
 	}
 
-	pub fn write_ram_u16(&mut self, data: u16, data_type: DataType) {
+	pub fn write_ram(&mut self, data: u8, data_type: DataCode) {
 		let address_index = self.regs.data_address as usize;
 		match data_type {
-			DataType::VramWrite => {
-				self.vram[address_index] = ((data & 0xFF00) >> 8) as u8;
-				self.vram[address_index.wrapping_add(1)] = (data & 0x00FF) as u8;
-				self.regs.data_address = self.regs.data_address.wrapping_add(self.regs.auto_increment);
+			DataCode::VramWrite => {
+				self.vram[address_index] = data;
 			},
-			DataType::CramWrite => {
-				self.color_ram[address_index] = ((data & 0xFF00) >> 8) as u8;
-				self.color_ram[address_index.wrapping_add(1)] = (data & 0x00FF) as u8;
+			DataCode::CramWrite => {
+				self.color_ram[address_index] = data;
 				self.regs.data_address = (self.regs.data_address + self.regs.auto_increment) % (CRAM_SIZE as u16);
 			},
-			DataType::VsramWrite => {
-				self.vscroll_ram[address_index] = ((data & 0xFF00) >> 8) as u8;
-				self.vscroll_ram[address_index.wrapping_add(1)] = (data & 0x00FF) as u8;
+			DataCode::VsramWrite => {
+				self.vscroll_ram[address_index] = data;
 				self.regs.data_address = (self.regs.data_address + self.regs.auto_increment) % (VSRAM_SIZE as u16);
 			},
 			_ => panic!("Attempted VDP RAM write in read mode."),
@@ -202,7 +263,6 @@ impl VDP {
 				self.regs.display_disable = h == 1;
 			},
 			"1000_0001_abcd_ef??" => {
-				println!("VDP reg $01 to {:#06X}", data);
 				self.regs.vram_128k = a == 1;
 				self.regs.display_enable = b == 1;
 				self.regs.v_interrupt_enable = c == 1;
@@ -249,7 +309,14 @@ impl VDP {
 				}
 			},
 			"1000_1100_h???_sii?" => {
+				let previous_mode = self.regs.h32_mode;
 				self.regs.h32_mode = h == 1;
+				if self.regs.h32_mode && !previous_mode {
+					self.clock_speed = 10;
+				}
+				if !self.regs.h32_mode && previous_mode {
+					self.clock_speed = 8;
+				}
 				self.regs.shadow_highlight_mode = s == 1;
 				self.regs.interlace_mode = match i {
 					0x00 => InterlaceMode::NoInterlace,
@@ -318,14 +385,17 @@ impl VDP {
 			"0000_0000_cccc_00aa" if self.data_command => {
 				self.regs.data_type_bits = self.regs.data_type_bits | (c << 2);
 				self.regs.data_address = self.regs.data_address | (a << 14);
-				self.regs.data_type = match self.regs.data_type_bits & 0xF {
-					0b0000 => DataType::VramRead,
-					0b0001 => DataType::VramWrite,
-					0b1000 => DataType::CramRead,
-					0b0011 => DataType::CramWrite,
-					0b0100 => DataType::VsramRead,
-					0b0101 => DataType::VsramWrite,
-					0b1100 => DataType::EightBit,
+				self.regs.data_code = match self.regs.data_type_bits {
+					0b000000 => DataCode::VramRead,
+					0b000001 => DataCode::VramWrite,
+                    0b100001 => DataCode::VramDma,
+					0b001000 => DataCode::CramRead,
+					0b000011 => DataCode::CramWrite,
+                    0b100011 => DataCode::CramDma,
+					0b000100 => DataCode::VsramRead,
+					0b000101 => DataCode::VsramWrite,
+                    0b100101 => DataCode::VsramDma,
+					0b001100 => DataCode::EightBitRead,
 					_ => panic!("Invalid VDP data type."),
 				};
 				self.dma_active = (self.regs.data_type_bits & 0b100000) == 0b100000;
@@ -370,17 +440,65 @@ impl VDP {
 
 	pub fn external_write(&mut self, data: u16) -> bool {
 		if self.dma_active && self.regs.dma_type == DmaType::Fill {
-			self.regs.dma_fill = (data & 0xFF) as u8;
 			self.fill_active = true;
 		}
 		if self.queue_size < 4 {
-			self.queue[self.queue_index] = data;
+			self.queue[self.queue_end] = FifoSlot {
+                code: self.regs.data_code,
+                address: self.regs.data_address,
+                data: data,
+                half_complete: false,
+            };
+            self.regs.data_address = match self.regs.data_code {
+                DataCode::VramWrite | DataCode::VramDma => self.regs.data_address.wrapping_add(self.regs.auto_increment),
+                DataCode::CramWrite | DataCode::CramDma =>
+                    (self.regs.data_address + self.regs.auto_increment) % (CRAM_SIZE as u16),
+                DataCode::VsramWrite | DataCode::VsramDma =>
+                    (self.regs.data_address + self.regs.auto_increment) % (VSRAM_SIZE as u16),
+                _ => panic!("Attempted VDP read in write mode"),
+            };
 			self.queue_size += 1;
-			self.queue_index = (self.queue_index + 1) % 4;
+			self.queue_end = (self.queue_end + 1) % 4;
 			true
 		}
 		else {
 			false
+		}
+	}
+
+	pub fn external_read_upper(&mut self) -> u8 {
+		match self.regs.data_code {
+			DataCode::VramRead => {
+				self.vram[self.regs.data_address as usize]
+			},
+			DataCode::CramRead => {
+				self.color_ram[self.regs.data_address as usize]
+			},
+			DataCode::VsramRead => {
+				self.vscroll_ram[self.regs.data_address as usize]
+			},
+			_ => panic!("Attempted VDP write in read mode.")
+		}
+	}
+
+	pub fn external_read_lower(&mut self) -> u8 {
+		match self.regs.data_code {
+			DataCode::VramRead => {
+				let data = self.vram[self.regs.data_address.wrapping_add(1) as usize];
+				self.regs.data_address = self.regs.data_address.wrapping_add(self.regs.auto_increment);
+				data
+			},
+			DataCode::CramRead => {
+				let data = self.color_ram[(self.regs.data_address + 1) as usize % CRAM_SIZE];
+				self.regs.data_address = (self.regs.data_address + self.regs.auto_increment) % (CRAM_SIZE as u16);
+				data
+			},
+			DataCode::VsramRead => {
+				let data = self.vscroll_ram[(self.regs.data_address + 1) as usize % VSRAM_SIZE];
+				self.regs.data_address = (self.regs.data_address + self.regs.auto_increment) % (VSRAM_SIZE as u16);
+				data
+			},
+			_ => panic!("Attempted VDP write in read mode.")
 		}
 	}
 }

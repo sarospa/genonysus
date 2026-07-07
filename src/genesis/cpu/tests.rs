@@ -5,7 +5,7 @@ use crate::genesis::CPU_ADDRESS_SPACE;
 #[test]
 fn ori() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE #$1234,D0
 	// ORI #$8260,D0
 	bus.write_program(&mut cpu, 0x303C);
@@ -22,7 +22,7 @@ fn ori() {
 #[test]
 fn andi() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE #$F234,D0
 	// ANDI #$8260,D0
 	bus.write_program(&mut cpu, 0x303C);
@@ -39,7 +39,7 @@ fn andi() {
 #[test]
 fn subi() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE #$1234,D0
 	// SUBI #$4444,D0
 	bus.write_program(&mut cpu, 0x303C);
@@ -56,7 +56,7 @@ fn subi() {
 #[test]
 fn addi() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE #$1234,D0
 	// ADDI #$DDDD,D0
 	bus.write_program(&mut cpu, 0x303C);
@@ -73,7 +73,7 @@ fn addi() {
 #[test]
 fn eori() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE #$1234,D0
 	// EORI #$FFFF,D0
 	bus.write_program(&mut cpu, 0x303C);
@@ -90,7 +90,7 @@ fn eori() {
 #[test]
 fn cmpi() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE #$1234,D0
 	// SUBI #$4444,D0
 	bus.write_program(&mut cpu, 0x303C);
@@ -106,7 +106,7 @@ fn cmpi() {
 #[test]
 fn btst() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE #$AAAA,D0
 	// BTST #4,D0
 	// BTST #13,D0
@@ -127,10 +127,10 @@ fn btst() {
 #[test]
 fn movea() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	bus.write_program(&mut cpu, 0x307C);
 	bus.write_program(&mut cpu, 0x8000);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.a[0] == 0xFFFF8000, "Expected value of A0 is 0xFFFF8000, actual value is {:#010X}", cpu.a[0]);
 }
@@ -138,11 +138,11 @@ fn movea() {
 #[test]
 fn instr_move() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE #$1234,D0
 	bus.write_program(&mut cpu, 0x303C);
 	bus.write_program(&mut cpu, 0x1234);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.d[0] == 0x1234, "Expected value of D0 is 0x00001234, actual value is {:#010X}", cpu.d[0]);
 }
@@ -150,11 +150,11 @@ fn instr_move() {
 #[test]
 fn move_to_sr() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE SR,#$2700
 	bus.write_program(&mut cpu, 0x46FC);
 	bus.write_program(&mut cpu, 0x2700);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.status_register == 0x2700, "Expected value of status register is 0x2700, actual value is {:#06X}", cpu.status_register);
 }
@@ -162,7 +162,7 @@ fn move_to_sr() {
 #[test]
 fn clr() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE #$FFFF,D0
 	// LEA $2000,A0
 	// MOVE #$FFFF,(A0)
@@ -192,9 +192,14 @@ fn not() {
 }
 
 #[test]
+fn ext() {
+	panic!("TODO");
+}
+
+#[test]
 fn swap() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE.L #$87654321,D0
 	// SWAP D0
 	// SWAP D0
@@ -216,7 +221,7 @@ fn swap() {
 #[test]
 fn pea() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// PEA $12345678
 	bus.write_program(&mut cpu, 0x4879);
 	bus.write_program(&mut cpu, 0x1234);
@@ -229,26 +234,26 @@ fn pea() {
 #[test]
 fn tst_zero() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// TST.W ($300)
 	bus.write_program(&mut cpu, 0x4A78);
 	bus.write_program(&mut cpu, 0x0300);
 	bus.ram[0x300] = 0x00;
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	let mut flags = cpu.get_ccr_flags();
 	assert!(!flags.n && flags.z, "Expected N: false and Z: true, actual value is N: {}, Z: {}", flags.n, flags.z);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	// TST.B ($300)
 	bus.write_program(&mut cpu, 0x4A38);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	flags = cpu.get_ccr_flags();
 	assert!(!flags.n && flags.z, "Expected N: false and Z: true, actual value is N: {}, Z: {}", flags.n, flags.z);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	// TST.L ($300)
 	bus.write_program(&mut cpu, 0x4AB8);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	flags = cpu.get_ccr_flags();
 	assert!(!flags.n && flags.z, "Expected N: false and Z: true, actual value is N: {}, Z: {}", flags.n, flags.z);
@@ -257,26 +262,26 @@ fn tst_zero() {
 #[test]
 fn tst_neg() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// TST.W ($300)
 	bus.write_program(&mut cpu, 0x4A78);
 	bus.write_program(&mut cpu, 0x0300);
 	bus.ram[0x300] = 0x80;
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	let mut flags = cpu.get_ccr_flags();
 	assert!(flags.n && !flags.z, "Expected N: true and Z: false, actual value is N: {}, Z: {}", flags.n, flags.z);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	// TST.B ($300)
 	bus.write_program(&mut cpu, 0x4A38);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	flags = cpu.get_ccr_flags();
 	assert!(flags.n && !flags.z, "Expected N: true and Z: false, actual value is N: {}, Z: {}", flags.n, flags.z);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	// TST.L ($300)
 	bus.write_program(&mut cpu, 0x4AB8);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	flags = cpu.get_ccr_flags();
 	assert!(flags.n && !flags.z, "Expected N: true and Z: false, actual value is N: {}, Z: {}", flags.n, flags.z);
@@ -285,35 +290,40 @@ fn tst_neg() {
 #[test]
 fn tst_pos() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// TST.W ($300)
 	bus.write_program(&mut cpu, 0x4A78);
 	bus.write_program(&mut cpu, 0x0300);
 	bus.ram[0x300] = 0x01;
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	let mut flags = cpu.get_ccr_flags();
 	assert!(!flags.n && !flags.z, "Expected N: false and Z: false, actual value is N: {}, Z: {}", flags.n, flags.z);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	// TST.B ($300)
 	bus.write_program(&mut cpu, 0x4A38);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	flags = cpu.get_ccr_flags();
 	assert!(!flags.n && !flags.z, "Expected N: false and Z: false, actual value is N: {}, Z: {}", flags.n, flags.z);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	// TST.L ($300)
 	bus.write_program(&mut cpu, 0x4AB8);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	flags = cpu.get_ccr_flags();
 	assert!(!flags.n && !flags.z, "Expected N: false and Z: false, actual value is N: {}, Z: {}", flags.n, flags.z);
 }
 
 #[test]
+fn link_unlnk() {
+	panic!("TODO");
+}
+
+#[test]
 fn move_usp() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE USP,A0
 	// LEA $1234,A0
 	// MOVE A0,USP
@@ -321,7 +331,7 @@ fn move_usp() {
 	bus.write_program(&mut cpu, 0x41F8);
 	bus.write_program(&mut cpu, 0x1234);
 	bus.write_program(&mut cpu, 0x4E60);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.usp = 0x00FF0000;
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.a[0] == 0x00FF0000, "Expected A0: 0x00FF0000, actual value is {:#010X}", cpu.a[0]);
@@ -338,11 +348,11 @@ fn jsr_rts() {
 #[test]
 fn jmp() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// JMP ($0400)
 	bus.write_program(&mut cpu, 0x4EF8);
 	bus.write_program(&mut cpu, 0x0400);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x0400, "Expected PC: 0x00000400, actual value is {:#010X}", cpu.program_counter);
 }
@@ -350,7 +360,7 @@ fn jmp() {
 #[test]
 fn movem_to_reg() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE.W #$0101,($2000)
 	// MOVE.W #$0202,($2002)
 	// MOVE.W #$0303,($2004)
@@ -377,7 +387,7 @@ fn movem_to_reg() {
 	bus.write_program(&mut cpu, 0x2000);
 	bus.write_program(&mut cpu, 0x4C98);
 	bus.write_program(&mut cpu, 0x142A);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	cpu.run_opcode(&mut bus);
 	cpu.run_opcode(&mut bus);
@@ -405,7 +415,7 @@ fn movem_to_reg() {
 #[test]
 fn movem_to_mem() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE.W #$0101,D1
 	// MOVE.W #$0202,D3
 	// MOVE.W #$0303,D5
@@ -427,7 +437,7 @@ fn movem_to_mem() {
 	bus.write_program(&mut cpu, 0x200A);
 	bus.write_program(&mut cpu, 0x48A0);
 	bus.write_program(&mut cpu, 0x5428);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	cpu.run_opcode(&mut bus);
 	cpu.run_opcode(&mut bus);
@@ -452,7 +462,7 @@ fn lea() {
 #[test]
 fn addq() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE #$24,D0
     // MOVE #$FF,D1
     // MOVE #$7F,D2
@@ -473,7 +483,7 @@ fn addq() {
 	bus.write_program(&mut cpu, 0x5801);
 	bus.write_program(&mut cpu, 0x5402);
 	bus.write_program(&mut cpu, 0x5C03);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus); // MOVE #$24,D0
 	cpu.run_opcode(&mut bus); // MOVE #$FF,D1
 	cpu.run_opcode(&mut bus); // MOVE #$7F,D2
@@ -500,7 +510,7 @@ fn subq() {
 #[test]
 fn dbcc() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE #$0F,D0
 	// LOOP:
     // ADDQ #1,D1
@@ -510,7 +520,7 @@ fn dbcc() {
 	bus.write_program(&mut cpu, 0x5241);
 	bus.write_program(&mut cpu, 0x51C8);
 	bus.write_program(&mut cpu, 0xFFFC);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	for _ in 0..33 {
 		cpu.run_opcode(&mut bus);
 	}
@@ -526,10 +536,10 @@ fn bsr() {
 #[test]
 fn bra() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BRA *+8
 	bus.write_program(&mut cpu, 0x6006);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
 }
@@ -537,12 +547,12 @@ fn bra() {
 #[test]
 fn bcc() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BCC *+8
 	// BCC *+8
 	bus.write_program(&mut cpu, 0x6406);
 	bus.write_program(&mut cpu, 0x6406);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_c(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
@@ -554,12 +564,12 @@ fn bcc() {
 #[test]
 fn bcs() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BCS *+8
 	// BCS *+8
 	bus.write_program(&mut cpu, 0x6506);
 	bus.write_program(&mut cpu, 0x6506);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_c(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
@@ -571,12 +581,12 @@ fn bcs() {
 #[test]
 fn beq() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BEQ *+8
 	// BEQ *+8
 	bus.write_program(&mut cpu, 0x6706);
 	bus.write_program(&mut cpu, 0x6706);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_z(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
@@ -588,14 +598,14 @@ fn beq() {
 #[test]
 fn bge() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BGE *+8
 	bus.write_program(&mut cpu, 0x6C06);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_v(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
@@ -612,52 +622,52 @@ fn bge() {
 #[test]
 fn bgt() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BGT *+8
 	bus.write_program(&mut cpu, 0x6E06);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(false);
 	cpu.set_v(false);
 	cpu.set_z(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(false);
 	cpu.set_v(false);
 	cpu.set_z(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(false);
 	cpu.set_v(true);
 	cpu.set_z(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(false);
 	cpu.set_v(true);
 	cpu.set_z(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(true);
 	cpu.set_v(false);
 	cpu.set_z(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(true);
 	cpu.set_v(false);
 	cpu.set_z(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(true);
 	cpu.set_v(true);
 	cpu.set_z(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(true);
 	cpu.set_v(true);
 	cpu.set_z(true);
@@ -668,25 +678,25 @@ fn bgt() {
 #[test]
 fn bhi() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BHI *+8
 	bus.write_program(&mut cpu, 0x6206);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_c(false);
 	cpu.set_z(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_c(false);
 	cpu.set_z(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_c(true);
 	cpu.set_z(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_c(true);
 	cpu.set_z(true);
 	cpu.run_opcode(&mut bus);
@@ -696,52 +706,52 @@ fn bhi() {
 #[test]
 fn ble() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BLE *+8
 	bus.write_program(&mut cpu, 0x6F06);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_z(false);
 	cpu.set_n(false);
 	cpu.set_v(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_z(false);
 	cpu.set_n(false);
 	cpu.set_v(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_z(false);
 	cpu.set_n(true);
 	cpu.set_v(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_z(false);
 	cpu.set_n(true);
 	cpu.set_v(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_z(true);
 	cpu.set_n(false);
 	cpu.set_v(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_z(true);
 	cpu.set_n(false);
 	cpu.set_v(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_z(true);
 	cpu.set_n(true);
 	cpu.set_v(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_z(true);
 	cpu.set_n(true);
 	cpu.set_v(true);
@@ -752,25 +762,25 @@ fn ble() {
 #[test]
 fn bls() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BLS *+8
 	bus.write_program(&mut cpu, 0x6306);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_c(false);
 	cpu.set_z(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_c(false);
 	cpu.set_z(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_c(true);
 	cpu.set_z(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_c(true);
 	cpu.set_z(true);
 	cpu.run_opcode(&mut bus);
@@ -780,25 +790,25 @@ fn bls() {
 #[test]
 fn blt() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BLT *+8
 	bus.write_program(&mut cpu, 0x6D06);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(false);
 	cpu.set_v(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(false);
 	cpu.set_v(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(true);
 	cpu.set_v(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(true);
 	cpu.set_v(true);
 	cpu.run_opcode(&mut bus);
@@ -808,14 +818,14 @@ fn blt() {
 #[test]
 fn bmi() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BMI *+8
 	bus.write_program(&mut cpu, 0x6B06);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
@@ -824,12 +834,12 @@ fn bmi() {
 #[test]
 fn bne() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BNE *+8
 	// BNE *+8
 	bus.write_program(&mut cpu, 0x6606);
 	bus.write_program(&mut cpu, 0x6606);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_z(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
@@ -841,14 +851,14 @@ fn bne() {
 #[test]
 fn bpl() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BPL *+8
 	bus.write_program(&mut cpu, 0x6A06);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x208, "Expected PC: 0x00000208, actual value is {:#010X}", cpu.program_counter);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_n(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
@@ -857,12 +867,12 @@ fn bpl() {
 #[test]
 fn bvc() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BVC *+8
 	// BVC *+8
 	bus.write_program(&mut cpu, 0x6806);
 	bus.write_program(&mut cpu, 0x6806);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_v(true);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
@@ -874,12 +884,12 @@ fn bvc() {
 #[test]
 fn bvs() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// BVS *+8
 	// BVS *+8
 	bus.write_program(&mut cpu, 0x6906);
 	bus.write_program(&mut cpu, 0x6906);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.set_v(false);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.program_counter == 0x202, "Expected PC: 0x00000202, actual value is {:#010X}", cpu.program_counter);
@@ -891,12 +901,17 @@ fn bvs() {
 #[test]
 fn moveq() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVEQ #$2D,D4
 	bus.write_program(&mut cpu, 0x789D);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus);
 	assert!(cpu.d[4] == 0xFFFFFF9D, "Expected D4: 0xFFFFFF9D, actual value is {:#010X}", cpu.d[4]);
+}
+
+#[test]
+fn divu() {
+	panic!("TODO");
 }
 
 #[test]
@@ -909,6 +924,12 @@ fn sub() { panic!("TODO"); }
 fn suba() { panic!("TODO"); }
 
 #[test]
+fn cmp() { panic!("TODO") }
+
+#[test]
+fn cmpa() { panic!("TODO") }
+
+#[test]
 fn mulu() { panic!("TODO"); }
 
 #[test]
@@ -919,13 +940,15 @@ fn and() {
 #[test]
 fn add() { panic!("TODO"); }
 
+fn addx() { panic!("TODO") }
+
 #[test]
 fn adda() { panic!("TODO"); }
 
 #[test]
 fn lsd_to_d() {
 	let mut bus = TestBus::new();
-	let mut cpu = CPU::new(&bus);
+	let mut cpu = CPU::new(&mut bus);
 	// MOVE.L #$1234567F,D0
 	// MOVE.L #$1234567F,D1
 	// MOVE.L #$1234567F,D2
@@ -952,7 +975,7 @@ fn lsd_to_d() {
 	bus.write_program(&mut cpu, 0xE00A);
 	bus.write_program(&mut cpu, 0xE769);
 	bus.write_program(&mut cpu, 0xE868);
-	cpu.test_reset(&bus);
+	cpu.test_reset(&mut bus);
 	cpu.run_opcode(&mut bus); // MOVE.L #$1234567F,D0
 	cpu.run_opcode(&mut bus); // MOVE.L #$1234567F,D1
 	cpu.run_opcode(&mut bus); // MOVE.L #$1234567F,D2
@@ -970,6 +993,15 @@ fn lsd_to_d() {
 	cpu.run_opcode(&mut bus); // LSR.W D4,D0
 	assert!(cpu.d[0] == 0x234567F0, "Expected D0: 0x234567F0, actual value is {:#010X}", cpu.d[0]);
 	assert!((cpu.status_register & 0b11111) == 0b10000, "Expected CCR: 0b10000, actual value is {:#07b}", cpu.status_register);
+}
+
+fn roxd_to_d() {
+	panic!("TODO");
+}
+
+#[test]
+fn rod_to_d() {
+	panic!("Todo");
 }
 
 // Representation of a simple memory map pointing exclusively to RAM
@@ -994,7 +1026,7 @@ impl TestBus {
 	}
 }
 impl Motorola68KBus for TestBus {
-	fn read_u8(&self, address: u32) -> u8 {
+	fn read_u8(&mut self, address: u32) -> u8 {
 		let address_index = (address as usize) & CPU_ADDRESS_SPACE;
 		self.ram[address_index]
 	}
@@ -1002,5 +1034,9 @@ impl Motorola68KBus for TestBus {
 		let address_index = (address as usize) & CPU_ADDRESS_SPACE;
 		println!("{:#010X}", address_index);
 		self.ram[address_index] = data;
+	}
+
+	fn assert_interrupt(&mut self, level: u16) {
+		// No means of asserting external interrupts on the test bus, so this does nothing.
 	}
 }

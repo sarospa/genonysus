@@ -4,6 +4,7 @@ use std::ops::BitOr;
 use std::ops::BitXor;
 use std::ops::Sub;
 use std::fmt;
+use std::path::absolute;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Size {
@@ -38,7 +39,7 @@ impl Size {
 		}
 	}
 	
-	pub fn length(&self) -> u32 {
+	pub fn width(&self) -> u32 {
 		match self {
 			Size::Byte => 1,
 			Size::Word => 2,
@@ -91,6 +92,14 @@ impl Data {
 			Size::Byte => Data::Byte(0xFF),
 			Size::Word => Data::Word(0xFFFF),
 			Size::Long => Data::Long(0xFFFFFFFF),
+		}
+	}
+
+	pub fn from_size(size: Size, data: u32) -> Data {
+		match size {
+			Size::Byte => Data::Byte(data as u8),
+			Size::Word => Data::Word(data as u16),
+			Size::Long => Data::Long(data),
 		}
 	}
 }
@@ -323,7 +332,7 @@ impl BinOpDirection {
 	}
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Condition {
 	True,
 	False,
@@ -874,6 +883,12 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 				}
 			}
 		},
+		Opcode::MoveFromSr { addr_mode } => {
+			match addr_mode {
+				AddrMode::DataReg(_) => 6,
+				_ => 8,
+			}
+		}
 		Opcode::MoveToSr { .. } => 12,
 		Opcode::Clr { size, addr_mode }
 			| Opcode::Neg { size, addr_mode }
@@ -894,6 +909,7 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 				}
 			}
 		},
+		Opcode::Ext { .. } => 4,
 		Opcode::Swap { .. } => 4,
 		Opcode::Pea { addr_mode } => {
 			match addr_mode {
@@ -904,7 +920,11 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 			}
 		},
 		Opcode::Tst { .. } => 4,
+		Opcode::Link { .. } => 16,
+		Opcode::Unlnk { .. } => 12,
 		Opcode::MoveUsp { .. } => 4,
+		Opcode::Nop => 4,
+		Opcode::Rte => 40,
 		Opcode::Rts => 16,
 		Opcode::Jsr { addr_mode } => {
 			match addr_mode {
@@ -1013,6 +1033,69 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 			}
 		},
 		Opcode::MoveQ { .. } => 4,
+		// I don't really understand the division cycle calculation algorithms
+		// I just took the code from https://www.atari-forum.com/viewtopic.php?t=6484
+		Opcode::DivU { .. } => {
+			let inputs = special_count.unwrap();
+			// The dividend and divisor are packed into the upper and lower long of special_count respectively.
+			// Don't judge me, Rust doesn't have default values.
+			let mut dividend = ((inputs >> 32) & 0xFFFF) as u32;
+			let divisor = (inputs & 0xFF) as u32;
+			if divisor == 0 {
+				return 0;
+			}
+			if (dividend >> 16) > divisor {
+				return 10;
+			}
+			let mut mcycles = 38;
+			let hdivisor = divisor << 16;
+			for i in 0..16 {
+				let temp = dividend;
+				dividend = dividend << 1;
+				if temp & 0x80000000 == 0x80000000 {
+					dividend -= hdivisor;
+				}
+				else {
+					mcycles += 2;
+					if dividend >= hdivisor {
+						dividend -= hdivisor;
+						mcycles -= 1;
+					}
+				}
+			}
+			return mcycles * 2;
+		},
+		Opcode::DivS { .. } => {
+			let inputs = special_count.unwrap();
+			// The dividend and divisor are packed into the upper and lower long of special_count respectively.
+			// Don't judge me, Rust doesn't have default values.
+			let mut dividend = ((inputs >> 32) & 0xFFFF) as i32;
+			let divisor = (inputs & 0xFF) as i32;
+			let mut mcycles = 6;
+			if dividend < 0 {
+				mcycles += 1;
+			}
+			if (dividend.abs() >> 16) > divisor.abs() {
+				return (mcycles + 2) * 2;
+			}
+			let mut aquot = dividend.abs() / divisor.abs();
+			mcycles += 55;
+			if divisor > 0 {
+				if dividend >= 0 {
+					mcycles -= 1;
+				}
+				else {
+					mcycles += 1;
+				}
+			}
+			for i in 0..16 {
+				if aquot >= 0 {
+					mcycles += 1;
+				}
+				aquot = aquot << 1;
+			}
+			return mcycles * 2;
+		}
 		Opcode::Or { dir, size, addr_mode, .. }
 			| Opcode::Sub { dir, size, addr_mode, .. }
 			| Opcode::And { dir, size, addr_mode, .. }
@@ -1037,6 +1120,23 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 				},
 			}
 		},
+		Opcode::SubX { size, source, .. }
+			| Opcode::AddX { size, source, .. } => {
+			match size {
+				Size::Long => {
+					match source {
+						AddrMode::DataReg(_) => 8,
+						_ => 30,
+					}
+				},
+				_ => {
+					match source {
+						AddrMode::DataReg(_) => 4,
+						_ => 18,
+					}
+				}
+			}
+		}
 		Opcode::SubA { size, source, .. }
 			| Opcode::AddA { size, source, .. } => {
 			match size {
@@ -1049,6 +1149,13 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 				_ => 8,
 			}
 		},
+		Opcode::Cmp { size, .. } => {
+			match size {
+				Size::Long => 6,
+				_ => 4,
+			}
+		},
+		Opcode::CmpA { .. } => 6,
 		Opcode::MulU { .. } => 38 + (2 * special_count.unwrap()),
 		Opcode::And { dir, size, addr_mode, .. } => {
 			match size {
@@ -1071,8 +1178,15 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 				}
 			}
 		},
-		Opcode::LsdToD { size, .. } => {
-			let rotation = rot.unwrap();
+		Opcode::Asd { .. }
+			| Opcode::Lsd { .. }
+			| Opcode::RoXd { .. }
+			| Opcode::Rod { .. } => 8,
+		Opcode::AsdToD { size, .. }
+			| Opcode::LsdToD { size, .. }
+			| Opcode::RoXdToD { size, .. }
+			| Opcode::RodToD { size, .. } => {
+ 			let rotation = rot.unwrap();
 			match size {
 				Size::Long => 8 + (rotation * 2),
 				_ => 6 + (rotation * 2),

@@ -23,15 +23,18 @@ pub enum DmaType {
     Copy
 }
 
-#[derive(Debug)]
-pub enum DataType {
+#[derive(Debug, Copy, Clone)]
+pub enum DataCode {
     VramRead,
     VramWrite,
+    VramDma,
     CramRead,
     CramWrite,
+    CramDma,
     VsramRead,
     VsramWrite,
-    EightBit,
+    VsramDma,
+    EightBitRead,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,6 +48,14 @@ pub enum VramSlot {
     SpritePattern,
     ExternalAccess,
     Refresh,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct FifoSlot {
+    pub code: DataCode,
+    pub address: u16,
+    pub data: u16,
+    pub half_complete: bool,
 }
 
 #[derive(Debug)]
@@ -88,13 +99,12 @@ pub struct VDPRegisters {
     pub dma_source: u32,
     pub dma_type: DmaType,
     pub data_address: u16,
-    pub data_type: DataType,
+    pub data_code: DataCode,
     pub data_type_bits: u16,
     pub v_interrupt_triggered: bool,
     pub scanline_sprite_overflow: bool,
     pub sprite_overlap: bool,
     pub odd_frame: bool,
-    pub dma_fill: u8,
 }
 impl VDPRegisters {
     pub fn new() -> VDPRegisters {
@@ -138,13 +148,12 @@ impl VDPRegisters {
             dma_source: 0,
             dma_type: DmaType::Cpu,
             data_address: 0,
-            data_type: DataType::VramRead,
+            data_code: DataCode::VramRead,
             data_type_bits: 0,
             v_interrupt_triggered: false,
             scanline_sprite_overflow: false,
             sprite_overlap: false,
             odd_frame: false,
-            dma_fill: 0,
         }
     }
 }
@@ -163,9 +172,9 @@ const PHASE_2_LIST: [VramSlot; 32] = [VramSlot::LayerAMapping, VramSlot::Externa
     VramSlot::LayerAPattern, VramSlot::LayerBMapping, VramSlot::SpriteMapping, VramSlot::LayerBPattern,
     VramSlot::LayerBPattern];
 
-pub fn current_vram_slot(h32_mode: bool, slot: u16, v_blank: bool) -> VramSlot {
+pub fn current_vram_slot(h32_mode: bool, slot: u16, display_disable: bool) -> VramSlot {
     let slot_index = slot as usize;
-    if v_blank {
+    if display_disable {
         return VramSlot::ExternalAccess
     }
     if h32_mode {
@@ -173,7 +182,7 @@ pub fn current_vram_slot(h32_mode: bool, slot: u16, v_blank: bool) -> VramSlot {
             PHASE_1_LIST[slot_index]
         }
         else if slot_index < 141 {
-            PHASE_2_LIST[(slot_index - 13) % 64]
+            PHASE_2_LIST[(slot_index - 13) % 32]
         }
         else {
             if slot == 141 || slot == 142 || slot == 156 || slot == 170 {
