@@ -1,5 +1,5 @@
 use super::*;
-use crate::genesis::Motorola68KBus;
+use crate::genesis::{Motorola68KBus, VDPState};
 use crate::genesis::CPU_ADDRESS_SPACE;
 
 #[test]
@@ -1038,5 +1038,13 @@ impl Motorola68KBus for TestBus {
 
 	fn assert_interrupt(&mut self, level: u16) {
 		// No means of asserting external interrupts on the test bus, so this does nothing.
+	}
+
+	fn acknowledge_interrupt(&mut self) -> Option<u16> {
+		None
+	}
+
+	fn expose_vdp_state(&mut self) -> &mut VDPState {
+		panic!("Don't call this.");
 	}
 }

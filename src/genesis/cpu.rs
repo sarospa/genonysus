@@ -21,9 +21,6 @@ pub struct CPU {
 	cycles: u64,
 	countdown: u64,
 	interrupt_vectors: [u32; 8],
-	interrupt_level: u16,
-	interrupt_set: bool,
-	suppress_output: bool,
 }
 
 impl CPU {
@@ -39,31 +36,29 @@ impl CPU {
 			countdown: 0,
 			interrupt_vectors: [bus.read_u32(0x60), bus.read_u32(0x64), bus.read_u32(0x68), bus.read_u32(0x6C),
 				bus.read_u32(0x70), bus.read_u32(0x74), bus.read_u32(0x78), bus.read_u32(0x7C)],
-			interrupt_level: 0,
-			interrupt_set: false,
-			suppress_output: true,
 		}
 	}
 	
 	pub fn advance_cycle(&mut self, bus: &mut dyn Motorola68KBus) {
 		if self.countdown == 0 {
-			if self.interrupt_set {
-				let mask = self.get_i();
-				if mask < self.interrupt_level || self.interrupt_level == 7 {
-					self.push(bus, Data::Long(self.program_counter));
-					self.push(bus, Data::Word(self.status_register));
-					self.set_i(6);
-					self.interrupt_set = false;
-					self.program_counter = self.interrupt_vectors[self.interrupt_level as usize];
-					self.countdown += 72;
-					self.cycles += 72;
-				}
-				else {
+			match bus.acknowledge_interrupt() {
+				Some(level) => {
+					let mask = self.get_i();
+					if mask < level || level == 7 {
+						self.push(bus, Data::Long(self.program_counter));
+						self.push(bus, Data::Word(self.status_register));
+						self.set_i(6);
+						self.program_counter = self.interrupt_vectors[level as usize];
+						self.countdown += 72;
+						self.cycles += 72;
+					}
+					else {
+						self.run_opcode(bus);
+					}
+				},
+				None => {
 					self.run_opcode(bus);
 				}
-			}
-			else {
-				self.run_opcode(bus);
 			}
 		}
 		self.countdown -= 1;
@@ -1297,11 +1292,6 @@ impl CPU {
 		self.countdown += cycles;
 	}
 
-	pub fn assert_interrupt(&mut self, level: u16) {
-		self.interrupt_level = level;
-		self.interrupt_set = true;
-	}
-	
 	#[bitmatch]
 	fn decode_opcode(&self, bus: &mut dyn Motorola68KBus) -> Opcode {
 		let opcode = bus.read_u16(self.program_counter);
