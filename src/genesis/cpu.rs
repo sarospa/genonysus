@@ -601,6 +601,24 @@ impl CPU {
 				#[cfg(feature = "trace")]
 				println!("CLR {}", addr_mode);
 			},
+			Opcode::Neg { size, addr_mode } => {
+				let data = self.read_with_mode(bus, addr_mode, size, false);
+				let zero = Data::from_size(size, 0);
+				let new_data = zero - data;
+				self.handle_sub_flags(data, zero, new_data);
+				self.write_with_mode(bus, addr_mode, new_data, true);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
+				println!("NEG {addr_mode} = {new_data}");
+			}
+			Opcode::Not { size, addr_mode } => {
+				let data = self.read_with_mode(bus, addr_mode, size, false) ^ Data::max(size);
+				self.handle_result_flags(data);
+				self.write_with_mode(bus, addr_mode, data, true);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
+				#[cfg(feature = "trace")]
+				println!("NOT {addr_mode} = {data}");
+			}
 			Opcode::Ext { size, dest } => {
 				let register = Register::from_dreg(dest);
 				let data = match size {
@@ -691,14 +709,6 @@ impl CPU {
 				cycles += calc_opcode_cycles(opcode, None, None, None, None);
 				#[cfg(feature = "trace")]
 				println!("NOP");
-			}
-			Opcode::Not { size, addr_mode } => {
-				let data = self.read_with_mode(bus, addr_mode, size, false) ^ Data::max(size);
-				self.handle_result_flags(data);
-				self.write_with_mode(bus, addr_mode, data, true);
-				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
-				#[cfg(feature = "trace")]
-				println!("NOT {addr_mode} = {data}");
 			}
 			Opcode::Rte => {
 				self.status_register = self.pop_u16(bus);
@@ -876,6 +886,18 @@ impl CPU {
 				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(addr_mode, size);
 				#[cfg(feature = "trace")]
 				println!("SUBQ #{data},{addr_mode}");
+			},
+			Opcode::Scc { cond, addr_mode } => {
+				let branch_taken = cond.check(self.get_ccr_flags());
+				if branch_taken {
+					self.write_with_mode(bus, addr_mode, Data::max(Size::Byte), true);
+				}
+				else {
+					self.write_with_mode(bus, addr_mode, Data::from_size(Size::Byte, 0), true);
+				}
+				cycles += calc_opcode_cycles(opcode, Some(branch_taken), None, None, None) + self.calc_addr_cycles(addr_mode, Size::Byte);
+				#[cfg(feature = "trace")]
+				println!("S{cond} = PC {:#010X}", self.program_counter);
 			}
 			Opcode::DBcc { cond, loop_down } => {
 				let mut branch_taken = false;
@@ -1035,6 +1057,17 @@ impl CPU {
 				#[cfg(feature = "trace")]
 				println!("SUBA {source},{dest} = {new_data}");
 			},
+			Opcode::Eor { dest, size, source } => {
+				let register = Register::from_dreg(dest);
+				let source_data = self.read_with_mode(bus, source, size, true);
+				let dest_data = self.read_register(register, size);
+				let new_data = source_data ^ dest_data;
+				self.write_register(register, new_data);
+				self.handle_result_flags(new_data);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(source, size);
+				#[cfg(feature = "trace")]
+				println!("EOR {source},{dest} = {new_data}");
+			}
 			Opcode::Cmp { dest, size, source } => {
 				let source_data = self.read_with_mode(bus, source, size, true);
 				let dest_data = self.read_register(Register::from_dreg(dest), size);

@@ -1013,6 +1013,17 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 					}
 				}
 			}
+		},
+		Opcode::Scc { addr_mode, .. } => {
+			match addr_mode {
+				AddrMode::DataReg(_) => {
+					match branch_taken.unwrap() {
+						true => 6,
+						false => 4,
+					}
+				},
+				_ => 8,
+			}
 		}
 		Opcode::DBcc { .. } => {
 			let branch_taken = branch_taken.unwrap();
@@ -1149,6 +1160,22 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 				_ => 8,
 			}
 		},
+		Opcode::Eor { size, source, .. } => {
+			match size {
+				Size::Long => {
+					match source {
+						AddrMode::DataReg(_) => 8,
+						_ => 12,
+					}
+				},
+				_ => {
+					match source {
+						AddrMode::DataReg(_) => 4,
+						_ => 8,
+					}
+				}
+			}
+		}
 		Opcode::Cmp { size, .. } => {
 			match size {
 				Size::Long => 6,

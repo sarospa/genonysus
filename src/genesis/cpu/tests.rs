@@ -187,6 +187,11 @@ fn clr() {
 }
 
 #[test]
+fn neg() {
+	panic!("TODO");
+}
+
+#[test]
 fn not() {
 	panic!("TODO");
 }
@@ -504,6 +509,11 @@ fn addq() {
 
 #[test]
 fn subq() {
+	panic!("TODO");
+}
+
+#[test]
+fn scc() {
 	panic!("TODO");
 }
 
@@ -922,6 +932,10 @@ fn sub() { panic!("TODO"); }
 
 #[test]
 fn suba() { panic!("TODO"); }
+
+fn eor() {
+	panic!("TODO");
+}
 
 #[test]
 fn cmp() { panic!("TODO") }

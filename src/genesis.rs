@@ -3,6 +3,8 @@ use bitmatch::bitmatch;
 
 mod cpu;
 mod vdp;
+mod screen;
+use screen::DisplayScreen;
 
 pub const CART_SIZE: usize = 0x400000;
 pub const CPU_RAM_SIZE: usize = 0x10000;
@@ -74,6 +76,7 @@ pub struct Genesis {
 	vdp: vdp::VDP,
 	cycles: u64,
 	bus: GenesisBus,
+	screen: DisplayScreen,
 }
 impl Genesis {
 	pub fn new(rom: &Vec<u8>) -> Genesis {
@@ -83,6 +86,7 @@ impl Genesis {
 			vdp: vdp::VDP::new(),
 			cycles: 0,
 			bus: bus,
+			screen: DisplayScreen::new(),
 		}
 	}
 	
@@ -103,7 +107,7 @@ impl Genesis {
 			}
 		}
 		if self.bus.vdp_state.countdown == 0 {
-			self.vdp.advance_cycle(&mut self.bus);
+			self.vdp.advance_cycle(&mut self.bus, &mut self.screen);
 		}
 		self.bus.vdp_state.countdown -= 1;
 	}
@@ -187,45 +191,48 @@ impl Motorola68KBus for GenesisBus {
 		if address_index != 0xC00001 && address_index != 0xC00003 {
 			self.vdp_data_write_upper = None;
 		}
-		let success = match address_index {
-			0..CART_SIZE => true, // Don't overwrite the cart ROM!
-			CPU_RAM_START..CPU_RAM_END => { self.cpu_ram[address_index - CPU_RAM_START] = data; true },
-			0xA00000..=0xA0FFFF => true, // Z80 address space (stub)
-			0xA10000..=0xA10001 => true, // Version register
-			0xA10002..=0xA10003 => { self.controller1.write(); true },
-			0xA10004..=0xA10005 => { self.controller2.write(); true },
-			0xA10006..=0xA10007 => true, // Expansion port data
-			0xA10008..=0xA10009 => { self.controller1_control = data; true },
-			0xA1000A..=0xA1000B => { self.controller2_control = data; true },
-			0xA1000C..=0xA1000D => true, // Expansion port control
-			0xA11100..=0xA11101 => true, // Z80 Bus Request Register (stub)
-			0xA11200..=0xA11201 => true, // Z80 Reset Register (stub)
-			0xC00000 | 0xC00002 => { self.vdp_data_write_upper = Some(data); true }
+		match address_index {
+			0..CART_SIZE => (), // Don't overwrite the cart ROM!
+			CPU_RAM_START..CPU_RAM_END => self.cpu_ram[address_index - CPU_RAM_START] = data,
+			0xA00000..=0xA0FFFF => (), // Z80 address space (stub)
+			0xA10000..=0xA10001 => (), // Version register
+			0xA10002..=0xA10003 => self.controller1.write(),
+			0xA10004..=0xA10005 => self.controller2.write(),
+			0xA10006..=0xA10007 => (), // Expansion port data
+			0xA10008..=0xA10009 => self.controller1_control = data,
+			0xA1000A..=0xA1000B => self.controller2_control = data,
+			0xA1000C..=0xA1000D => (), // Expansion port control
+			0xA11100..=0xA11101 => (), // Z80 Bus Request Register (stub)
+			0xA11200..=0xA11201 => (), // Z80 Reset Register (stub)
+			0xC00000 | 0xC00002 => self.vdp_data_write_upper = Some(data),
 			0xC00001 | 0xC00003 => {
 				if let Some(upper) = self.vdp_data_write_upper {
-					self.vdp_state.external_write(((upper as u16) << 8) + (data as u16));
+					let result = self.vdp_state.external_write(((upper as u16) << 8) + (data as u16));
+					if !result {
+						self.cpu_write_queue.push_back(QueuedWrite {
+							address: address - 1,
+							data: upper,
+						});
+						self.write_failed = true;
+						self.cpu_write_queue.push_back(QueuedWrite {
+							address: address,
+							data: data,
+						});
+						self.write_failed = true;
+					}
 				}
-				true
 			}
-			0xC00004 | 0xC00006 => { self.vdp_control_select = Some(data); true },
+			0xC00004 | 0xC00006 => self.vdp_control_select = Some(data),
 			0xC00005 | 0xC00007 => {
 				if let Some(select) = self.vdp_control_select {
 					self.vdp_state.write_register(((select as u16) << 8) + (data as u16));
 				}
-				true
 			},
-			0xC00011 => true, // PSG Control Register (stub)
+			0xC00011 => (), // PSG Control Register (stub)
 			_ => {
 				panic!("Attempt to write to address {:#08X} located in unimplemented memory region.", address);
 			}
 		};
-		if !success {
-			self.cpu_write_queue.push_back(QueuedWrite {
-				address: address,
-				data: data,
-			});
-			self.write_failed = true;
-		}
 	}
 
 	fn assert_interrupt(&mut self, level: u16) {
@@ -404,8 +411,8 @@ impl VDPState {
 			interlace_mode: InterlaceMode::NoInterlace,
 			h_scroll_address: 0,
 			auto_increment: 0,
-			plane_height: 0,
-			plane_width: 0,
+			plane_height: 256,
+			plane_width: 256,
 			window_right: false,
 			window_h: 0,
 			window_down: false,
@@ -486,14 +493,14 @@ impl VDPState {
 				self.column_scroll = v == 1;
 				self.h_scroll = match h {
 					0b00 => HScroll::Fullscreen,
-					0b10 => HScroll::EightPixel,
-					0b11 => HScroll::OnePixel,
+					0b10 => HScroll::Row,
+					0b11 => HScroll::Line,
 					_ => panic!("Invalid hscroll mode {:#04b}.", h),
 				}
 			},
 			"1000_1100_h???_sii?" => {
 				let previous_mode = self.h32_mode;
-				self.h32_mode = h == 1;
+				self.h32_mode = h == 0;
 				if self.h32_mode && !previous_mode {
 					self.clock_speed = 10;
 				}
@@ -532,7 +539,7 @@ impl VDPState {
 				};
 				if h * w >= 0x2000 { panic!("Plane area exceeds 0x2000 pixels."); }
 				self.plane_height = height;
-				self.plane_height = width;
+				self.plane_width = width;
 			},
 			"1001_0001_r??h_hhhh" => {
 				self.window_right = r == 1;
@@ -684,13 +691,38 @@ impl VDPState {
 			_ => panic!("Attempted VDP write in read mode.")
 		}
 	}
+
+	pub fn print_vram(&self) {
+		for y in 0..=0xFFF {
+			print!("{:06X}   ", y * 0x10);
+			for x in 0..=0xF {
+				print!("{:02X} ", self.vram[y * 0x10 + x]);
+			}
+			println!();
+		}
+	}
+
+	pub fn read_vram_u16(&self, address: u16) -> u16 {
+		let address_index = address as usize;
+		((self.vram[address_index] as u16) << 8) + (self.vram[address_index.wrapping_add(1)] as u16)
+	}
+
+	pub fn read_vsram_u16(&self, address: u16) -> u16 {
+		let address_index = address as usize;
+		((self.vscroll_ram[address_index] as u16) << 8) + (self.vscroll_ram[(address_index + 1) % VSRAM_SIZE] as u16)
+	}
+
+	pub fn read_cram_u16(&self, address: u16) -> u16 {
+		let address_index = address as usize;
+		((self.color_ram[address_index] as u16) << 8) + (self.color_ram[(address_index + 1) % CRAM_SIZE] as u16)
+	}
 }
 
 #[derive(Debug)]
 pub enum HScroll {
 	Fullscreen,
-	EightPixel,
-	OnePixel,
+	Row,
+	Line,
 }
 
 #[derive(Debug)]
