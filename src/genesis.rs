@@ -3,8 +3,9 @@ use bitmatch::bitmatch;
 
 mod cpu;
 mod vdp;
-mod screen;
-use screen::DisplayScreen;
+mod external;
+use external::RealExternal;
+use crate::genesis::external::External;
 
 pub const CART_SIZE: usize = 0x400000;
 pub const CPU_RAM_SIZE: usize = 0x10000;
@@ -69,6 +70,10 @@ trait Motorola68KBus {
 	}
 
 	fn expose_vdp_state(&mut self) -> &mut VDPState;
+
+	fn expose_io(&mut self) -> &mut dyn External;
+
+	fn ref_io(&self) -> &dyn External;
 }
 
 pub struct Genesis {
@@ -76,7 +81,6 @@ pub struct Genesis {
 	vdp: vdp::VDP,
 	cycles: u64,
 	bus: GenesisBus,
-	screen: DisplayScreen,
 }
 impl Genesis {
 	pub fn new(rom: &Vec<u8>) -> Genesis {
@@ -86,12 +90,12 @@ impl Genesis {
 			vdp: vdp::VDP::new(),
 			cycles: 0,
 			bus: bus,
-			screen: DisplayScreen::new(),
 		}
 	}
 	
 	pub fn advance_cycle(&mut self) {
 		self.cycles += 1;
+		self.bus.cycles = self.cycles;
 		if self.cycles % 7 == 0 && self.bus.bus_lock == BusLock::CPU {
 			if self.bus.cpu_write_queue.len() == 0 {
 				self.cpu.advance_cycle(&mut self.bus);
@@ -107,9 +111,13 @@ impl Genesis {
 			}
 		}
 		if self.bus.vdp_state.countdown == 0 {
-			self.vdp.advance_cycle(&mut self.bus, &mut self.screen);
+			self.vdp.advance_cycle(&mut self.bus);
 		}
 		self.bus.vdp_state.countdown -= 1;
+	}
+
+	pub fn open(&self) -> bool {
+		self.bus.io.open()
 	}
 }
 
@@ -128,6 +136,8 @@ struct GenesisBus {
 	bus_lock: BusLock,
 	cpu_write_queue: VecDeque<QueuedWrite>,
 	write_failed: bool,
+	cycles: u64,
+	io: RealExternal,
 }
 impl GenesisBus {
 	fn new(rom: &Vec<u8>) -> GenesisBus {
@@ -141,7 +151,7 @@ impl GenesisBus {
 			cart_memory: cart_memory,
 			interrupt_level: 0,
 			interrupt_set: false,
-			controller1: Controller::Unplugged,
+			controller1: Controller::ThreeButton { control: 0 },
 			controller1_control: 0,
 			controller2: Controller::Unplugged,
 			controller2_control: 0,
@@ -151,6 +161,8 @@ impl GenesisBus {
 			bus_lock: BusLock::CPU,
 			cpu_write_queue: VecDeque::new(),
 			write_failed: false,
+			cycles: 0,
+			io: RealExternal::new(),
 		}
 	}
 }
@@ -162,14 +174,15 @@ impl Motorola68KBus for GenesisBus {
 			CPU_RAM_START..CPU_RAM_END => self.cpu_ram[address_index - CPU_RAM_START],
 			0xA00000..=0xA0FFFF => 0, // Z80 address space (stub)
 			0xA10000..=0xA10001 => 0, // Version register
-			0xA10002..=0xA10003 => self.controller1.read(),
-			0xA10004..=0xA10005 => self.controller2.read(),
+			0xA10002..=0xA10003 => self.controller1.read(self.ref_io()),
+			0xA10004..=0xA10005 => self.controller2.read(self.ref_io()),
 			0xA10006..=0xA10007 => 0, // Expansion port data
 			0xA10008..=0xA10009 => self.controller1_control,
 			0xA1000A..=0xA1000B => self.controller2_control,
 			0xA1000C..=0xA1000D => 0, // Expansion port control
 			0xA11100..=0xA11101 => 0, // Z80 Bus Request Register (stub)
 			0xA11200..=0xA11201 => 0, // Z80 Reset Register (stub)
+			0xA14000..=0xA14003 => 0, // TMSS Register
 			0xC00000 | 0xC00002 => self.vdp_state.external_read_upper(),
 			0xC00001 | 0xC00003 => self.vdp_state.external_read_lower(),
 			0xC00004 | 0xC00006 => self.vdp_state.read_register_upper(),
@@ -196,14 +209,15 @@ impl Motorola68KBus for GenesisBus {
 			CPU_RAM_START..CPU_RAM_END => self.cpu_ram[address_index - CPU_RAM_START] = data,
 			0xA00000..=0xA0FFFF => (), // Z80 address space (stub)
 			0xA10000..=0xA10001 => (), // Version register
-			0xA10002..=0xA10003 => self.controller1.write(),
-			0xA10004..=0xA10005 => self.controller2.write(),
+			0xA10002..=0xA10003 => self.controller1.write(data, self.cycles),
+			0xA10004..=0xA10005 => self.controller2.write(data, self.cycles),
 			0xA10006..=0xA10007 => (), // Expansion port data
 			0xA10008..=0xA10009 => self.controller1_control = data,
 			0xA1000A..=0xA1000B => self.controller2_control = data,
 			0xA1000C..=0xA1000D => (), // Expansion port control
 			0xA11100..=0xA11101 => (), // Z80 Bus Request Register (stub)
 			0xA11200..=0xA11201 => (), // Z80 Reset Register (stub)
+			0xA14000..=0xA14003 => (), // TMSS Register
 			0xC00000 | 0xC00002 => self.vdp_data_write_upper = Some(data),
 			0xC00001 | 0xC00003 => {
 				if let Some(upper) = self.vdp_data_write_upper {
@@ -253,29 +267,66 @@ impl Motorola68KBus for GenesisBus {
 	fn expose_vdp_state(&mut self) -> &mut VDPState {
 		&mut self.vdp_state
 	}
+
+	fn expose_io(&mut self) -> &mut dyn External {
+		&mut self.io
+	}
+
+	fn ref_io(&self) -> &dyn External {
+		&self.io
+	}
 }
 
 #[derive(Debug)]
 pub enum Controller {
 	Unplugged,
-	ThreeButton,
-	SixButton,
+	ThreeButton { control: u8 },
+	SixButton { control: u8, state: u8, cycles: u64},
 }
 
 impl Controller {
-	pub fn read(&self) -> u8 {
+	pub fn read(&self, io: &dyn External) -> u8 {
 		match self {
 			Controller::Unplugged => 0,
-			Controller::ThreeButton => panic!("Three button controller not implemented."),
-			Controller::SixButton => panic!("Six button controller not implemented."),
+			Controller::ThreeButton { control } => {
+				let buttons = io.button_array(); // A B C X Y Z Up Down Left Right Start Mode
+				let control_bit = *control & 0x40;
+				if control_bit == 0x40 {
+					let c_bit = if buttons[2] { 0 } else { 0x20 };
+					let b_bit = if buttons[1] { 0 } else { 0x10 };
+					let right_bit = if buttons[9] { 0 } else { 0x08 };
+					let left_bit = if buttons[8] { 0 } else { 0x04 };
+					let down_bit = if buttons[7] { 0 } else { 0x02 };
+					let up_bit = if buttons[6] { 0 } else { 0x01 };
+					control_bit | c_bit | b_bit | right_bit | left_bit | down_bit | up_bit
+				}
+				else {
+					let start_bit = if buttons[10] { 0 } else { 0x20 };
+					let a_bit = if buttons[0] { 0 } else { 0x10 };
+					let down_bit = if buttons[7] { 0 } else { 0x02 };
+					let up_bit = if buttons[6] { 0 } else { 0x01 };
+					control_bit | start_bit | a_bit | down_bit | up_bit
+				}
+			},
+			Controller::SixButton { .. } => panic!("Six button controller not implemented."),
 		}
 	}
 	
-	pub fn write(&mut self) -> () {
+	pub fn write(&mut self, data: u8, cur_cycles: u64) -> () {
 		match self {
 			Controller::Unplugged => (),
-			Controller::ThreeButton => panic!("Three button controller not implemented."),
-			Controller::SixButton => panic!("Six button controller not implemented."),
+			Controller::ThreeButton { control } => *control = data,
+			Controller::SixButton { control, state, cycles } => {
+				// Reset to three button behavior after ~1.5ms
+				if cur_cycles - *cycles > 11505 {
+					*state = (*control & 0x40) >> 6;
+				}
+				*cycles = cur_cycles;
+				if (*control & 0x40) != (data & 0x40) {
+					*state = (*state + 1) % 8;
+				}
+				*control = data;
+			},
 		}
 	}
 }
@@ -365,7 +416,7 @@ impl VDPState {
 			h_phase: 1,
 			h_blank: false,
 			access_slot: 0,
-			slot_ready: false,
+			slot_ready: true,
 			v_counter: 0,
 			v_phase: 1,
 			v_blank: false,

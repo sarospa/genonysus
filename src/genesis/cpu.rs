@@ -341,6 +341,23 @@ impl CPU {
 				};
 				address
 			},
+			AddrMode::PCWithIndex => {
+				let extension_word = bus.read_u16(self.program_counter);
+				let index: i32 = CPU::sign_extend_u8((extension_word & 0xFF) as u8);
+				let mode = (extension_word & 0x8000) >> 15;
+				let reg = (extension_word & 0x7000) >> 12;
+				let test = (extension_word & 0x0800) >> 11;
+				let size = if (extension_word & 0x0800) >> 11 == 1 { Size::Long } else { Size::Word };
+				let reg_data = self.read_register(Register::new(reg as usize, mode == 1), size).sign_extend();
+				let address = match reg_data {
+					Data::Long(d) => self.program_counter.wrapping_add_signed(index).wrapping_add(d),
+					_ => panic!("Invalid size in Address With Index"),
+				};
+				if advance {
+					self.program_counter += 2;
+				};
+				address
+			},
 			AddrMode::AbsoluteShort => {
 				let address = 0u32.wrapping_add_signed(CPU::sign_extend_u16(bus.read_u16(self.program_counter)));
 				if advance {
@@ -355,7 +372,7 @@ impl CPU {
 				};
 				address
 			},
-			_ => panic!("Unimplemented address calculation addressing mode {:?}.", addr_mode),
+			_ => panic!("Cannot calculate address in {addr_mode} mode"),
 		};
 		address & 0x00FFFFFF
 	}
@@ -464,14 +481,14 @@ impl CPU {
 		self.set_n(result.is_negative());
 		self.set_z(result.is_zero());
 		self.set_v(dest.is_negative() != source.is_negative() && dest.is_negative() != result.is_negative());
-		self.set_c(result > dest || result > source);
+		self.set_c(source > dest);
 	}
 
 	fn handle_compare_flags(&mut self, dest: Data, source: Data, result: Data) {
 		self.set_n(result.is_negative());
 		self.set_z(result.is_zero());
 		self.set_v(dest.is_negative() != source.is_negative() && dest.is_negative() != result.is_negative());
-		self.set_c(result > dest || result > source);
+		self.set_c(source > dest);
 	}
 	
 	#[bitmatch]
@@ -479,6 +496,9 @@ impl CPU {
 		#[cfg(feature = "trace")]
 		print!("{:#010X} {:#010} ", self.program_counter, self.cycles);
 		let opcode = self.decode_opcode(bus);
+		if self.program_counter == 0x20C86 && bus.read_u8(0xFFFFF3) == 0x02 {
+			println!("test");
+		}
 		self.program_counter += 2;
 		let mut cycles = 0;
 		match opcode {
@@ -546,8 +566,8 @@ impl CPU {
 					AddrMode::DataReg(_) => Size::Long,
 					_ => Size::Byte,
 				};
-				let data = self.read_with_mode(bus, addr_mode, size, true);
 				let bit_select = self.read_with_mode(bus, AddrMode::Immediate, Size::Word, true);
+				let data = self.read_with_mode(bus, addr_mode, size, true);
 				match (data, bit_select) {
 					(Data::Byte(d), Data::Word(s)) => self.set_z(((d >> (s % 8)) & 0b1) == 0),
 					(Data::Long(d), Data::Word(s)) => self.set_z(((d >> (s % 32)) & 0b1) == 0),
@@ -1058,13 +1078,13 @@ impl CPU {
 				println!("SUBA {source},{dest} = {new_data}");
 			},
 			Opcode::Eor { dest, size, source } => {
-				let register = Register::from_dreg(dest);
-				let source_data = self.read_with_mode(bus, source, size, true);
-				let dest_data = self.read_register(register, size);
+				let register = Register::from_dreg(source);
+				let dest_data = self.read_with_mode(bus, dest, size, false);
+				let source_data = self.read_register(register, size);
 				let new_data = source_data ^ dest_data;
-				self.write_register(register, new_data);
+				self.write_with_mode(bus, dest, new_data, true);
 				self.handle_result_flags(new_data);
-				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(source, size);
+				cycles += calc_opcode_cycles(opcode, None, None, None, None) + self.calc_addr_cycles(dest, size);
 				#[cfg(feature = "trace")]
 				println!("EOR {source},{dest} = {new_data}");
 			}
@@ -1786,9 +1806,9 @@ impl CPU {
 			// EOR
 			"1011_ddd1_ssmm_mxxx" => {
 				Opcode::Eor {
-					dest: DReg::new(d),
+					source: DReg::new(d),
 					size: Size::from_low_bits(s),
-					source: self.decode_addressing_mode(((m << 3) + x) as u8),
+					dest: self.decode_addressing_mode(((m << 3) + x) as u8),
 				}
 			},
 			// CMPM

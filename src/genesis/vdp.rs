@@ -1,5 +1,4 @@
 use crate::genesis::Motorola68KBus;
-use crate::genesis::screen::Screen;
 use crate::genesis::{VDPState, DmaType, DataCode, HScroll, VSRAM_SIZE, CRAM_SIZE};
 
 #[derive(Debug)]
@@ -13,8 +12,9 @@ impl VDP {
 		}
 	}
 
-	pub fn advance_cycle(&mut self, bus: &mut dyn Motorola68KBus, screen: &mut dyn Screen) {
+	pub fn advance_cycle(&mut self, bus: &mut dyn Motorola68KBus) {
 		let mut v_interrupt = false;
+		let mut frame_complete = false;
 		{
 			let state = bus.expose_vdp_state();
 			state.dot_counter = state.dot_counter + (state.clock_speed as u16);
@@ -65,7 +65,7 @@ impl VDP {
 				}
 				if state.v_counter == 0xE0 && state.v_phase == 1 {
 					state.v_blank = true;
-                    screen.frame_complete();
+					frame_complete = true;
 					if state.v_interrupt_enable {
 						v_interrupt = true;
 						state.v_interrupt_triggered = true;
@@ -76,7 +76,7 @@ impl VDP {
 					if self.frame % 60 == 0 {
 						println!("frame {}", self.frame);
 						if self.frame == 600 {
-							panic!("10 seconds");
+							//panic!("10 seconds");
 						}
 					}
 					state.v_interrupt_triggered = false;
@@ -91,14 +91,17 @@ impl VDP {
 					state.access_slot = (state.access_slot + 1) % 210;
 				}
 				state.slot_ready = false;
+				self.compose_pixel(bus);
 			}
 			else {
 				state.slot_ready = true;
 			}
-			self.compose_pixel(state, screen);
 		}
 		if v_interrupt {
 			bus.assert_interrupt(6);
+		}
+		if frame_complete {
+			bus.expose_io().frame_complete();
 		}
 	}
 
@@ -172,36 +175,79 @@ impl VDP {
 		}
 	}
 
-	fn compose_pixel(&self, state: &VDPState, screen: &mut dyn Screen) {
-		if (state.h32_mode && (state.h_counter >= 256 || state.v_counter >= 224))
-			|| (!state.h32_mode) && (state.h_counter >= 320 || state.v_counter >= 224) {
-			return;
+	fn compose_pixel(&self, bus: &mut dyn Motorola68KBus) {
+		let color_1;
+		let color_2;
+		let screen_x;
+		let screen_y;
+		{
+			let state = bus.expose_vdp_state();
+			if (state.h32_mode && (state.h_counter >= 256 || state.v_counter >= 224))
+				|| (!state.h32_mode) && (state.h_counter >= 320 || state.v_counter >= 224) {
+				return;
+			}
+			screen_x = state.h_counter;
+			screen_y = state.v_counter;
+			// Apparently scroll bytes are interleaved, first plane B, then plane A.
+			let x_offset_b = match state.h_scroll {
+				HScroll::Fullscreen => state.read_vram_u16(state.h_scroll_address as u16),
+				HScroll::Row => state.read_vram_u16((state.h_scroll_address as u16) + (screen_x / 2)),
+				HScroll::Line => state.read_vram_u16((state.h_scroll_address as u16) + (screen_x * 4)),
+			};
+			let y_offset_b = match state.column_scroll {
+				false => state.read_vsram_u16(0),
+				true => state.read_vram_u16(screen_y / 8),
+			};
+			let x = (screen_x + x_offset_b) % state.plane_width;
+			let y = (screen_y + y_offset_b) % state.plane_height;
+			let pixels_a = VDP::fetch_plane_pixels(x, y, state.plane_a_address as u16, state);
+			let pixels_b = VDP::fetch_plane_pixels(x, y, state.plane_b_address as u16, state);
+			let b_color = state.read_cram_u16((state.background_palette << 5) + (state.background_color * 2));
+			color_1 = if (pixels_a.high_priority || !pixels_b.high_priority) && !pixels_a.transparent_1 {
+				pixels_a.color_1
+			}
+			else if !pixels_b.transparent_1 {
+				pixels_b.color_1
+			}
+			else {
+				b_color
+			};
+			color_2 = if (pixels_a.high_priority || !pixels_b.high_priority) && !pixels_a.transparent_2 {
+				pixels_a.color_2
+			}
+			else if !pixels_b.transparent_2 {
+				pixels_b.color_2
+			}
+			else {
+				b_color
+			};
 		}
-		// Apparently scroll bytes are interleaved, first plane B, then plane A.
-		let x_offset_b = match state.h_scroll {
-			HScroll::Fullscreen => state.read_vram_u16(state.h_scroll_address as u16),
-			HScroll::Row => state.read_vram_u16((state.h_scroll_address as u16) + (state.h_counter / 2)),
-			HScroll::Line => state.read_vram_u16((state.h_scroll_address as u16) + (state.h_counter * 4)),
-		};
-		let y_offset_b = match state.column_scroll {
-			false => state.read_vsram_u16(0),
-			true => state.read_vram_u16(state.v_counter / 8),
-		};
-		let x = (state.h_counter + x_offset_b) % state.plane_width;
-		let y = (state.v_counter + y_offset_b) % state.plane_height;
-		let nametable_index_b = (state.plane_b_address as u16) + ((x / 8) * 2) + ((y / 8) * (state.plane_width / 4));
-		let tile_data = state.read_vram_u16(nametable_index_b);
-		let _high_priority = ((tile_data >> 15) & 0x1) == 0x1;
+		bus.expose_io().output_pixel(color_1, screen_x, screen_y);
+		bus.expose_io().output_pixel(color_2, screen_x + 1, screen_y);
+	}
+
+	fn fetch_plane_pixels(x: u16, y: u16, nametable: u16, state: &VDPState) -> PixelPack {
+		let nametable_index = nametable + ((x / 8) * 2) + ((y / 8) * (state.plane_width / 4));
+		let tile_data = state.read_vram_u16(nametable_index);
+		let high_priority = ((tile_data >> 15) & 0x1) == 0x1;
 		let palette = (tile_data >> 13) & 0b11;
 		let v_flip = (tile_data >> 12) & 0x1;
 		let h_flip = (tile_data >> 11) & 0x1;
-		let tile_index = (tile_data & 0x7F) << 5;
+		let tile_index = (tile_data & 0x7FF) << 5;
 		let tile_x = (x & 0b111) ^ (h_flip * 0b111);
 		let tile_y = (y & 0b111) ^ (v_flip * 0b111);
-		let mut palette_color: u16 = state.vram[(tile_index + (tile_x / 2) + (tile_y * 4)) as usize] as u16;
-		palette_color = if x % 2 == 0 { (palette_color & 0xF0) >> 4 } else { palette_color & 0x0F };
-		let color = state.read_cram_u16((palette << 5) + (palette_color * 2));
-		screen.output_pixel(color, state.h_counter, state.v_counter);
+		let palette_color: u16 = state.vram[(tile_index + (tile_x / 2) + (tile_y * 4)) as usize] as u16;
+		let p_color_1 = (palette_color & 0xF0) >> 4;
+		let p_color_2 = palette_color & 0x0F;
+		let color_1 = state.read_cram_u16((palette << 5) + (p_color_1 * 2));
+		let color_2 = state.read_cram_u16((palette << 5) + (p_color_2 * 2));
+		PixelPack {
+			color_1: color_1,
+			color_2: color_2,
+			high_priority: high_priority,
+			transparent_1: p_color_1 == 0,
+			transparent_2: p_color_2 == 0,
+		}
 	}
 }
 
@@ -269,4 +315,13 @@ pub fn current_vram_slot(h32_mode: bool, slot: u16, display_disable: bool) -> Vr
 			}
 		}
 	}
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PixelPack {
+	color_1: u16,
+	color_2: u16,
+	high_priority: bool,
+	transparent_1: bool,
+	transparent_2: bool,
 }

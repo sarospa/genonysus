@@ -1,20 +1,25 @@
-use minifb::{Scale, ScaleMode, Window, WindowOptions};
+use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
 
-pub trait Screen {
+pub trait External {
     fn output_pixel(&mut self, pixel: u16, x: u16, y: u16);
 
     fn frame_complete(&mut self);
+
+    fn open(&self) -> bool;
+
+    fn button_array(&self) -> &[bool; 12];
 }
 
-pub struct DisplayScreen {
+pub struct RealExternal {
     buffer: Vec<u32>,
     window: Window,
+    keys: [bool; 12] // A B C X Y Z Up Down Left Right Start Mode
 }
-impl DisplayScreen {
-    pub fn new() -> DisplayScreen {
+impl RealExternal {
+    pub fn new() -> RealExternal {
         let options = WindowOptions {
             borderless: false,
             title: true,
@@ -35,13 +40,14 @@ impl DisplayScreen {
             panic!("{}", e);
         });
         //window.set_target_fps(60);
-        DisplayScreen {
+        RealExternal {
             buffer: vec![0; WIDTH * HEIGHT],
             window: window,
+            keys: [false; 12]
         }
     }
 }
-impl Screen for DisplayScreen {
+impl External for RealExternal {
     fn output_pixel(&mut self, pixel: u16, x: u16, y: u16) {
         let red = ((pixel as u32) & 0x000F) << 20;
         let green = ((pixel as u32) & 0x00F0) << 8;
@@ -52,26 +58,48 @@ impl Screen for DisplayScreen {
     fn frame_complete(&mut self) {
         if self.window.is_open() {
             self.window.update_with_buffer(&self.buffer, WIDTH, HEIGHT).unwrap();
+            self.keys = [self.window.is_key_down(Key::Z), self.window.is_key_down(Key::X),
+                self.window.is_key_down(Key::C), self.window.is_key_down(Key::A),
+                self.window.is_key_down(Key::S), self.window.is_key_down(Key::D),
+                self.window.is_key_down(Key::Up), self.window.is_key_down(Key::Down),
+                self.window.is_key_down(Key::Left), self.window.is_key_down(Key::Right),
+                self.window.is_key_down(Key::Enter), self.window.is_key_down(Key::Space)];
         }
+    }
+
+    fn open(&self) -> bool {
+        self.window.is_open()
+    }
+
+    fn button_array(&self) -> &[bool; 12] {
+        &self.keys
     }
 }
 
-pub struct DummyScreen {
+pub struct DummyExternal {
 
 }
-impl DummyScreen {
-    pub fn new() -> DummyScreen {
-        DummyScreen {
+impl DummyExternal {
+    pub fn new() -> DummyExternal {
+        DummyExternal {
 
         }
     }
 }
-impl Screen for DummyScreen {
+impl External for DummyExternal {
     fn output_pixel(&mut self, _pixel: u16, _x: u16, _y: u16) {
 
     }
 
     fn frame_complete(&mut self) {
 
+    }
+
+    fn open(&self) -> bool {
+        true
+    }
+
+    fn button_array(&self) -> &[bool; 12] {
+        &[false; 12]
     }
 }

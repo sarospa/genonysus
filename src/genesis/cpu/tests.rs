@@ -1,6 +1,7 @@
 use super::*;
 use crate::genesis::{Motorola68KBus, VDPState};
 use crate::genesis::CPU_ADDRESS_SPACE;
+use crate::genesis::external::External;
 
 #[test]
 fn ori() {
@@ -1059,6 +1060,14 @@ impl Motorola68KBus for TestBus {
 	}
 
 	fn expose_vdp_state(&mut self) -> &mut VDPState {
+		panic!("Don't call this.");
+	}
+
+	fn expose_io(&mut self) -> &mut dyn External  {
+		panic!("Don't call this.");
+	}
+
+	fn ref_io(&self) -> &dyn External {
 		panic!("Don't call this.");
 	}
 }

@@ -444,7 +444,7 @@ impl fmt::Display for AddrMode {
 			AddrMode::AddressWithDisp(reg) => write!(f, "(d16,A{reg})"),
 			AddrMode::AddressWithIndex(reg) => write!(f, "(d8,A{reg},Xn)"),
 			AddrMode::PCWithDisp => write!(f, "(d16,PC)"),
-			AddrMode::PCWithIndex => write!(f, "(d8,PC,Xn"),
+			AddrMode::PCWithIndex => write!(f, "(d8,PC,Xn)"),
 			AddrMode::AbsoluteShort => write!(f, "(xxx).W"),
 			AddrMode::AbsoluteLong => write!(f, "(xxx).L"),
 			AddrMode::Immediate => write!(f, "#imm"),
@@ -521,7 +521,7 @@ pub enum Opcode {
 	Sub { reg: DReg, dir: BinOpDirection, size: Size, addr_mode: AddrMode },
 	SubX { dest: AddrMode, size: Size, source: AddrMode },
 	SubA { dest: AReg, size: Size, source: AddrMode },
-	Eor { dest: DReg, size: Size, source: AddrMode },
+	Eor { source: DReg, size: Size, dest: AddrMode },
 	CmpM { dest: AReg, size: Size, source: AReg },
 	Cmp { dest: DReg, size: Size, source: AddrMode },
 	CmpA { dest: AReg, size: Size, source: AddrMode },
@@ -1160,7 +1160,7 @@ pub fn calc_opcode_cycles(opcode: Opcode, branch_taken: Option<bool>, counter_ex
 				_ => 8,
 			}
 		},
-		Opcode::Eor { size, source, .. } => {
+		Opcode::Eor { size, dest: source, .. } => {
 			match size {
 				Size::Long => {
 					match source {

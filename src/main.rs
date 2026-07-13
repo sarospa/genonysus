@@ -21,7 +21,7 @@ fn main() {
 	
 	let mut console = genesis::Genesis::new(&rom);
 	
-	loop {
+	while console.open() {
 		console.advance_cycle();
 	}
 }
