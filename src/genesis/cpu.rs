@@ -496,9 +496,6 @@ impl CPU {
 		#[cfg(feature = "trace")]
 		print!("{:#010X} {:#010} ", self.program_counter, self.cycles);
 		let opcode = self.decode_opcode(bus);
-		if self.program_counter == 0x20C86 && bus.read_u8(0xFFFFF3) == 0x02 {
-			println!("test");
-		}
 		self.program_counter += 2;
 		let mut cycles = 0;
 		match opcode {
